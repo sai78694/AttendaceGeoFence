@@ -3,6 +3,8 @@ package com.example.attendancegeofence.ui.screens
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
+import android.util.Log
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
@@ -40,6 +42,7 @@ import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -66,12 +69,21 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.navigation.NavController
 import androidx.navigation.compose.rememberNavController
+import com.example.attendancegeofence.data.models.Attendance
+import com.example.attendancegeofence.data.models.Course
+import com.example.attendancegeofence.data.models.Session
 import com.example.attendancegeofence.geofence.GeofenceManager
 import com.example.attendancegeofence.ui.theme.AttendanceGeoFenceTheme
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.google.android.gms.tasks.CancellationTokenSource
+import com.google.firebase.Timestamp
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.delay
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlin.math.PI
 import kotlin.math.atan2
 import kotlin.math.cos
@@ -79,22 +91,81 @@ import kotlin.math.pow
 import kotlin.math.sin
 import kotlin.math.sqrt
 
-// Coordinates for testing (e.g., Hall 4B)
-// Chennai coordinates as placeholder
-const val TARGET_LAT = 12.98416852946774
-const val TARGET_LONG = 80.21770082334685
-const val GEOFENCE_RADIUS_METERS = 50.0
-
 @Composable
 fun CheckInScreen(navController: NavController) {
     val context = LocalContext.current
     val geofenceManager = remember { GeofenceManager(context) }
     val fusedLocationClient = remember { LocationServices.getFusedLocationProviderClient(context) }
+    val auth = remember { FirebaseAuth.getInstance() }
+    val firestore = remember { FirebaseFirestore.getInstance() }
 
     var distanceToTarget by remember { mutableStateOf<Double?>(null) }
     var isWithinRange by remember { mutableStateOf(false) }
     var foregroundPermissionsGranted by remember { mutableStateOf(false) }
     var backgroundPermissionGranted by remember { mutableStateOf(false) }
+    var isSubmitting by remember { mutableStateOf(false) }
+
+    var currentSession by remember { mutableStateOf<Session?>(null) }
+    var currentCourse by remember { mutableStateOf<Course?>(null) }
+    var userName by remember { mutableStateOf("User") }
+    var isLoadingSession by remember { mutableStateOf(true) }
+    var timeRemaining by remember { mutableStateOf("--:--") }
+
+    // Fetch User Profile and Current Session
+    LaunchedEffect(Unit) {
+        val uid = auth.currentUser?.uid
+        if (uid != null) {
+            firestore.collection("users").document(uid).get().addOnSuccessListener {
+                userName = it.getString("name") ?: "User"
+            }
+        }
+
+        val now = Timestamp.now()
+        firestore.collection("sessions")
+            .whereGreaterThanOrEqualTo("endTime", now)
+            .get()
+            .addOnSuccessListener { documents ->
+                val sessions = documents.toObjects(Session::class.java)
+                // Filter manually for active session because whereGreaterThanOrEqualTo only handles one side
+                val activeSession = sessions.find { it.startTime <= now }
+
+                if (activeSession != null) {
+                    currentSession = activeSession
+                    firestore.collection("courses").document(activeSession.courseId).get()
+                        .addOnSuccessListener { courseDoc ->
+                            currentCourse = courseDoc.toObject(Course::class.java)
+                            isLoadingSession = false
+                        }
+                        .addOnFailureListener {
+                            isLoadingSession = false
+                        }
+                } else {
+                    isLoadingSession = false
+                }
+            }
+            .addOnFailureListener {
+                isLoadingSession = false
+            }
+    }
+
+    // Time Remaining Countdown
+    LaunchedEffect(currentSession) {
+        while (currentSession != null) {
+            val now = Date().time
+            val endTime = currentSession!!.endTime.toDate().time
+            val diff = endTime - now
+            if (diff > 0) {
+                val hours = diff / (1000 * 60 * 60)
+                val minutes = (diff / (1000 * 60)) % 60
+                val seconds = (diff / 1000) % 60
+                timeRemaining = String.format("%02d:%02d:%02d", hours, minutes, seconds)
+            } else {
+                timeRemaining = "00:00:00"
+                currentSession = null // Session ended
+            }
+            delay(1000)
+        }
+    }
 
     // Launcher for background location permission (Android 10+)
     val backgroundLocationLauncher = rememberLauncherForActivityResult(
@@ -151,8 +222,9 @@ fun CheckInScreen(navController: NavController) {
     }
 
     // Real-time location tracking
-    LaunchedEffect(foregroundPermissionsGranted) {
-        if (foregroundPermissionsGranted) {
+    LaunchedEffect(foregroundPermissionsGranted, currentSession) {
+        val session = currentSession
+        if (foregroundPermissionsGranted && session != null) {
             while (true) {
                 fusedLocationClient.getCurrentLocation(
                     Priority.PRIORITY_HIGH_ACCURACY,
@@ -162,14 +234,17 @@ fun CheckInScreen(navController: NavController) {
                         if (location != null) {
                             val distance = calculateDistance(
                                 location.latitude, location.longitude,
-                                TARGET_LAT, TARGET_LONG
+                                session.latitude, session.longitude
                             )
                             distanceToTarget = distance
-                            isWithinRange = distance <= GEOFENCE_RADIUS_METERS
+                            isWithinRange = distance <= session.radius
                         }
                     }
                 delay(5000) // Update every 5 seconds
             }
+        } else {
+            distanceToTarget = null
+            isWithinRange = false
         }
     }
 
@@ -186,78 +261,144 @@ fun CheckInScreen(navController: NavController) {
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Spacer(modifier = Modifier.height(16.dp))
-            CheckInTopBar()
+            CheckInTopBar(userName)
 
             Spacer(modifier = Modifier.height(24.dp))
 
-            // "Current Session" Badge
-            Surface(
-                shape = RoundedCornerShape(50),
-                color = Color(0xFFEBEEF0)
-            ) {
-                Text(
-                    text = "CURRENT SESSION",
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
-                    style = MaterialTheme.typography.labelSmall.copy(
-                        fontWeight = FontWeight.ExtraBold,
-                        letterSpacing = 0.5.sp,
-                        color = Color(0xFF1A365D)
-                    )
-                )
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-            CheckInHeader()
-
-            Spacer(modifier = Modifier.height(32.dp))
-
-            // Geofence Visualizer Card
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(32.dp),
-                color = Color.White,
-                shadowElevation = 2.dp
-            ) {
-                Column(
-                    modifier = Modifier.padding(vertical = 32.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    GeofenceVisualizer(isWithinRange)
-
-                    if (!isWithinRange) {
-                        Spacer(modifier = Modifier.height(24.dp))
-                        OutOfRangeWarning(distanceToTarget?.toInt() ?: 0)
+            if (isLoadingSession) {
+                Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(color = Color(0xFF1A365D))
+                }
+            } else if (currentSession == null) {
+                Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(
+                            imageVector = Icons.Default.Schedule,
+                            contentDescription = null,
+                            tint = Color.Gray,
+                            modifier = Modifier.size(64.dp)
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Text(
+                            text = "No current ongoing session",
+                            style = MaterialTheme.typography.titleLarge.copy(color = Color.Gray),
+                            textAlign = TextAlign.Center
+                        )
                     }
                 }
-            }
+            } else {
+                val session = currentSession!!
+                val course = currentCourse
 
-            Spacer(modifier = Modifier.height(32.dp))
-            MetricsGrid(isWithinRange, distanceToTarget?.toInt() ?: 0)
-
-            Spacer(modifier = Modifier.height(32.dp))
-            MarkAttendanceButton(isWithinRange) {
-                if (backgroundPermissionGranted) {
-                    geofenceManager.addGeofence("hall_4b", TARGET_LAT, TARGET_LONG)
-                    // TODO: Trigger success animation or API call
-                } else {
-                    // Fallback or warning if background permission is missing
-                }
-            }
-
-            if (!isWithinRange) {
-                Spacer(modifier = Modifier.height(12.dp))
-                Text(
-                    text = "Verification requires proximity and active GPS",
-                    style = MaterialTheme.typography.bodySmall.copy(
-                        color = Color(0xFF74777F),
-                        textAlign = TextAlign.Center
+                // "Current Session" Badge
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = Color(0xFFEBEEF0)
+                ) {
+                    Text(
+                        text = "CURRENT SESSION",
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontWeight = FontWeight.ExtraBold,
+                            letterSpacing = 0.5.sp,
+                            color = Color(0xFF1A365D)
+                        )
                     )
-                )
-            }
+                }
 
-            if (isWithinRange) {
-                Spacer(modifier = Modifier.height(24.dp))
-                StatusMessage()
+                Spacer(modifier = Modifier.height(16.dp))
+                CheckInHeader(session, course)
+
+                Spacer(modifier = Modifier.height(32.dp))
+
+                // Geofence Visualizer Card
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(32.dp),
+                    color = Color.White,
+                    shadowElevation = 2.dp
+                ) {
+                    Column(
+                        modifier = Modifier.padding(vertical = 32.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        GeofenceVisualizer(isWithinRange)
+
+                        if (!isWithinRange) {
+                            Spacer(modifier = Modifier.height(24.dp))
+                            OutOfRangeWarning(distanceToTarget?.toInt() ?: 0)
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(32.dp))
+                MetricsGrid(isWithinRange, distanceToTarget?.toInt() ?: 0, timeRemaining)
+
+                Spacer(modifier = Modifier.height(32.dp))
+                MarkAttendanceButton(
+                    isEnabled = isWithinRange && !isSubmitting,
+                    isLoading = isSubmitting
+                ) {
+                    if (backgroundPermissionGranted) {
+                        val userId = auth.currentUser?.uid
+                        if (userId != null) {
+                            isSubmitting = true
+
+                            // Create attendance data map for cleaner Firestore insertion
+                            val attendanceData = hashMapOf(
+                                "userId" to userId,
+                                "courseId" to session.courseId,
+                                "sessionId" to session.id,
+                                "timestamp" to Timestamp.now(),
+                                "status" to "PRESENT"
+                            )
+
+                            Log.d("CheckInScreen", "Attempting to mark attendance: $attendanceData")
+
+                            // Save to Firestore
+                            firestore.collection("attendance")
+                                .add(attendanceData)
+                                .addOnSuccessListener { docRef ->
+                                    isSubmitting = false
+                                    Log.d("CheckInScreen", "Attendance marked successfully with ID: ${docRef.id}")
+                                    
+                                    // Add Geofence to monitor if they stay in range
+                                    geofenceManager.addGeofence(session.id, session.latitude, session.longitude)
+                                    
+                                    Toast.makeText(context, "Attendance Marked Successfully!", Toast.LENGTH_SHORT).show()
+                                    navController.navigate("history")
+                                }
+                                .addOnFailureListener { e ->
+                                    isSubmitting = false
+                                    Log.e("CheckInScreen", "Failed to mark attendance", e)
+                                    Toast.makeText(context, "Failed: ${e.message}", Toast.LENGTH_SHORT).show()
+                                }
+                        } else {
+                            Toast.makeText(context, "User not authenticated", Toast.LENGTH_SHORT).show()
+                        }
+                    } else {
+                        Toast.makeText(context, "Background location permission required", Toast.LENGTH_SHORT).show()
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                            backgroundLocationLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+                        }
+                    }
+                }
+
+                if (!isWithinRange) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = "Verification requires proximity and active GPS",
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            color = Color(0xFF74777F),
+                            textAlign = TextAlign.Center
+                        )
+                    )
+                }
+
+                if (isWithinRange) {
+                    Spacer(modifier = Modifier.height(24.dp))
+                    StatusMessage()
+                }
             }
 
             Spacer(modifier = Modifier.height(32.dp))
@@ -278,7 +419,7 @@ fun calculateDistance(lat1: Double, lon1: Double, lat2: Double, lon2: Double): D
 }
 
 @Composable
-fun CheckInTopBar() {
+fun CheckInTopBar(name: String) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
@@ -302,7 +443,7 @@ fun CheckInTopBar() {
                     )
                 )
                 Text(
-                    text = "Alex Johnson",
+                    text = name,
                     style = MaterialTheme.typography.bodyMedium.copy(
                         color = Color(0xFF1A365D),
                         fontWeight = FontWeight.Bold
@@ -320,10 +461,10 @@ fun CheckInTopBar() {
 }
 
 @Composable
-fun CheckInHeader() {
+fun CheckInHeader(session: Session, course: Course?) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Text(
-            text = "Hall 4B",
+            text = session.location,
             style = MaterialTheme.typography.headlineLarge.copy(
                 fontWeight = FontWeight.ExtraBold,
                 fontSize = 44.sp,
@@ -333,7 +474,7 @@ fun CheckInHeader() {
         )
         Spacer(modifier = Modifier.height(4.dp))
         Text(
-            text = "Advanced Macroeconomics • Section A",
+            text = "${course?.title ?: "Unknown Course"} • ${session.type}",
             style = MaterialTheme.typography.bodyMedium.copy(
                 color = Color(0xFF43474E),
                 fontWeight = FontWeight.Medium
@@ -440,7 +581,11 @@ fun OutOfRangeWarning(distance: Int) {
 }
 
 @Composable
-fun MarkAttendanceButton(isEnabled: Boolean, onClick: () -> Unit) {
+fun MarkAttendanceButton(
+    isEnabled: Boolean,
+    isLoading: Boolean = false,
+    onClick: () -> Unit
+) {
     Button(
         onClick = onClick,
         modifier = Modifier
@@ -451,41 +596,49 @@ fun MarkAttendanceButton(isEnabled: Boolean, onClick: () -> Unit) {
             containerColor = if (isEnabled) Color(0xFF1A365D) else Color(0xFFEBEEF0),
             contentColor = if (isEnabled) Color.White else Color(0xFFC4C6CF)
         ),
-        enabled = isEnabled
+        enabled = isEnabled && !isLoading
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.Center,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            if (!isEnabled) {
-                Icon(
-                    imageVector = Icons.Default.Lock,
-                    contentDescription = null,
-                    modifier = Modifier.size(18.dp)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-            }
-            Text(
-                text = "Mark Attendance",
-                style = MaterialTheme.typography.titleMedium.copy(
-                    fontWeight = FontWeight.Bold
-                )
+        if (isLoading) {
+            CircularProgressIndicator(
+                color = Color.White,
+                modifier = Modifier.size(24.dp),
+                strokeWidth = 2.dp
             )
-            if (isEnabled) {
-                Spacer(modifier = Modifier.width(12.dp))
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.ArrowForwardIos,
-                    contentDescription = null,
-                    modifier = Modifier.size(16.dp)
+        } else {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (!isEnabled) {
+                    Icon(
+                        imageVector = Icons.Default.Lock,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                }
+                Text(
+                    text = "Mark Attendance",
+                    style = MaterialTheme.typography.titleMedium.copy(
+                        fontWeight = FontWeight.Bold
+                    )
                 )
+                if (isEnabled) {
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ArrowForwardIos,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
             }
         }
     }
 }
 
 @Composable
-fun MetricsGrid(isWithinRange: Boolean, distance: Int) {
+fun MetricsGrid(isWithinRange: Boolean, distance: Int, timeRemaining: String) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(16.dp)
@@ -494,7 +647,7 @@ fun MetricsGrid(isWithinRange: Boolean, distance: Int) {
             modifier = Modifier.weight(1f),
             icon = Icons.Default.Schedule,
             label = "TIME REMAINING",
-            value = "08:42",
+            value = timeRemaining,
             iconColor = Color(0xFF1A365D)
         )
         MetricCard(
@@ -545,7 +698,7 @@ fun MetricCard(
                 style = MaterialTheme.typography.titleLarge.copy(
                     color = valueColor,
                     fontWeight = FontWeight.ExtraBold,
-                    fontSize = 24.sp
+                    fontSize = 20.sp
                 )
             )
         }
@@ -597,7 +750,9 @@ fun CheckInBottomNavigation(navController: NavController) {
             horizontalArrangement = Arrangement.SpaceAround,
             verticalAlignment = Alignment.Bottom
         ) {
-            CheckInBottomNavItem(icon = Icons.Outlined.Home, label = "HOME", onClick = {})
+            CheckInBottomNavItem(icon = Icons.Outlined.Home, label = "HOME", onClick = {
+                navController.navigate("home")
+            })
             CheckInBottomNavItem(
                 icon = Icons.Outlined.Schedule,
                 label = "SCHEDULE",
@@ -608,7 +763,9 @@ fun CheckInBottomNavigation(navController: NavController) {
                 label = "CHECK-IN",
                 isSelected = true,
                 onClick = {})
-            CheckInBottomNavItem(icon = Icons.Outlined.History, label = "HISTORY", onClick = {})
+            CheckInBottomNavItem(icon = Icons.Outlined.History, label = "HISTORY", onClick = {
+                navController.navigate("history")
+            })
         }
     }
 }
