@@ -27,6 +27,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForwardIos
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.LocationOff
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Lock
@@ -597,7 +598,11 @@ fun CheckInBottomNavigation(navController: NavController) {
             horizontalArrangement = Arrangement.SpaceAround,
             verticalAlignment = Alignment.Bottom
         ) {
-            CheckInBottomNavItem(icon = Icons.Outlined.Home, label = "HOME", onClick = {})
+            CheckInBottomNavItem(
+                icon = Icons.Outlined.Home, 
+                label = "HOME", 
+                onClick = { navController.navigate("home") }
+            )
             CheckInBottomNavItem(
                 icon = Icons.Outlined.Schedule,
                 label = "SCHEDULE",
@@ -608,7 +613,11 @@ fun CheckInBottomNavigation(navController: NavController) {
                 label = "CHECK-IN",
                 isSelected = true,
                 onClick = {})
-            CheckInBottomNavItem(icon = Icons.Outlined.History, label = "HISTORY", onClick = {})
+            CheckInBottomNavItem(
+                icon = Icons.Outlined.History, 
+                label = "HISTORY", 
+                onClick = { navController.navigate("history") }
+            )
         }
     }
 }

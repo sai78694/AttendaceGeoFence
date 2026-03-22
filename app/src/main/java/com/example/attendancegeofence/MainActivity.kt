@@ -9,6 +9,8 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.example.attendancegeofence.ui.screens.CheckInScreen
+import com.example.attendancegeofence.ui.screens.HistoryScreen
+import com.example.attendancegeofence.ui.screens.HomeScreen
 import com.example.attendancegeofence.ui.screens.LoginScreen
 import com.example.attendancegeofence.ui.screens.RegisterScreen
 import com.example.attendancegeofence.ui.screens.ScheduleScreen
@@ -40,21 +42,27 @@ fun AppNavigation() {
         }
         composable("login") {
             LoginScreen(
-                onLoginClick = { _, _ -> navController.navigate("schedule") },
+                onLoginClick = { _, _ -> navController.navigate("home") },
                 onSignUpClick = { navController.navigate("register") }
             )
         }
         composable("register") {
             RegisterScreen(
-                onRegisterClick = { navController.navigate("schedule") },
+                onRegisterClick = { navController.navigate("home") },
                 onLoginClick = { navController.navigate("login") }
             )
+        }
+        composable("home") {
+            HomeScreen(navController = navController)
         }
         composable("schedule") {
             ScheduleScreen(navController = navController)
         }
         composable("checkin") {
             CheckInScreen(navController = navController)
+        }
+        composable("history") {
+            HistoryScreen(navController = navController)
         }
     }
 }

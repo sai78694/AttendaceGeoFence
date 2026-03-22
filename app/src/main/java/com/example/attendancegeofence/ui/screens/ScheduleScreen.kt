@@ -411,14 +411,22 @@ fun ScheduleBottomNavigation(navController: NavController) {
             horizontalArrangement = Arrangement.SpaceAround,
             verticalAlignment = Alignment.Bottom
         ) {
-            ScheduleBottomNavItem(icon = Icons.Outlined.Home, label = "HOME", onClick = {})
+            ScheduleBottomNavItem(
+                icon = Icons.Outlined.Home, 
+                label = "HOME", 
+                onClick = { navController.navigate("home") }
+            )
             ScheduleBottomNavItem(icon = Icons.Default.CalendarToday, label = "SCHEDULE", isSelected = true, onClick = {})
             ScheduleBottomNavItem(
                 icon = Icons.Outlined.LocationOn, 
                 label = "CHECK-IN", 
                 onClick = { navController.navigate("checkin") }
             )
-            ScheduleBottomNavItem(icon = Icons.Outlined.History, label = "HISTORY", onClick = {})
+            ScheduleBottomNavItem(
+                icon = Icons.Outlined.History, 
+                label = "HISTORY", 
+                onClick = { navController.navigate("history") }
+            )
         }
     }
 }
