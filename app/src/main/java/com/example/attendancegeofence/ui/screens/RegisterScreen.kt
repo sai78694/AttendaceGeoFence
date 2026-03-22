@@ -1,5 +1,6 @@
 package com.example.attendancegeofence.ui.screens
 
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -20,6 +21,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -32,19 +34,27 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.attendancegeofence.data.models.User
 import com.example.attendancegeofence.ui.theme.AttendanceGeoFenceTheme
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.FirebaseFirestore
 
 @Composable
 fun RegisterScreen(
     onRegisterClick: () -> Unit = {},
     onLoginClick: () -> Unit = {}
 ) {
+    val context = LocalContext.current
     var fullName by remember { mutableStateOf("") }
     var email by remember { mutableStateOf("") }
     var studentId by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var passwordVisible by remember { mutableStateOf(false) }
     var termsAccepted by remember { mutableStateOf(false) }
+    var isLoading by remember { mutableStateOf(false) }
+
+    val auth = remember { FirebaseAuth.getInstance() }
+    val firestore = remember { FirebaseFirestore.getInstance() }
 
     Scaffold(
         modifier = Modifier.fillMaxSize(),
@@ -86,7 +96,6 @@ fun RegisterScreen(
 
             Spacer(modifier = Modifier.height(60.dp))
 
-            // Title
             Text(
                 text = "Create Account",
                 style = MaterialTheme.typography.headlineLarge.copy(
@@ -100,7 +109,6 @@ fun RegisterScreen(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Description
             Text(
                 text = "Join the community of scholars and manage your academic journey with ease.",
                 style = MaterialTheme.typography.bodyMedium.copy(
@@ -114,7 +122,6 @@ fun RegisterScreen(
 
             Spacer(modifier = Modifier.height(40.dp))
 
-            // Registration Card
             Surface(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(24.dp),
@@ -124,7 +131,6 @@ fun RegisterScreen(
                 Column(
                     modifier = Modifier.padding(24.dp)
                 ) {
-                    // Full Name Field
                     RegisterInputField(
                         label = "Full Name",
                         value = fullName,
@@ -134,7 +140,6 @@ fun RegisterScreen(
 
                     Spacer(modifier = Modifier.height(20.dp))
 
-                    // Student Email Field
                     RegisterInputField(
                         label = "Student Email",
                         value = email,
@@ -145,7 +150,6 @@ fun RegisterScreen(
 
                     Spacer(modifier = Modifier.height(20.dp))
 
-                    // Student ID Field
                     RegisterInputField(
                         label = "Student ID",
                         value = studentId,
@@ -155,7 +159,6 @@ fun RegisterScreen(
 
                     Spacer(modifier = Modifier.height(20.dp))
 
-                    // Password Field
                     Text(
                         text = "Create Password",
                         style = MaterialTheme.typography.labelLarge.copy(
@@ -167,21 +170,13 @@ fun RegisterScreen(
                     OutlinedTextField(
                         value = password,
                         onValueChange = { password = it },
-                        placeholder = {
-                            Text(
-                                "••••••••",
-                                color = Color(0xFFC4C6CF)
-                            )
-                        },
+                        placeholder = { Text("••••••••", color = Color(0xFFC4C6CF)) },
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(12.dp),
                         visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                         trailingIcon = {
-                            val image = if (passwordVisible)
-                                Icons.Filled.Visibility
-                            else Icons.Filled.VisibilityOff
-
+                            val image = if (passwordVisible) Icons.Filled.Visibility else Icons.Filled.VisibilityOff
                             IconButton(onClick = { passwordVisible = !passwordVisible }) {
                                 Icon(imageVector = image, contentDescription = null, tint = Color(0xFF43474E))
                             }
@@ -196,12 +191,10 @@ fun RegisterScreen(
 
                     Spacer(modifier = Modifier.height(24.dp))
 
-                    // Terms and Conditions Row
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        // Custom Circular Checkbox
                         Box(
                             modifier = Modifier
                                 .size(24.dp)
@@ -234,57 +227,77 @@ fun RegisterScreen(
                                     append("Privacy Policy")
                                 }
                             },
-                            style = MaterialTheme.typography.bodySmall.copy(
-                                color = Color(0xFF43474E),
-                                lineHeight = 18.sp
-                            )
+                            style = MaterialTheme.typography.bodySmall.copy(color = Color(0xFF43474E), lineHeight = 18.sp)
                         )
                     }
 
                     Spacer(modifier = Modifier.height(32.dp))
 
-                    // Create Account Button
                     Button(
-                        onClick = onRegisterClick,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(64.dp),
+                        onClick = {
+                            if (fullName.isEmpty() || email.isEmpty() || studentId.isEmpty() || password.isEmpty()) {
+                                Toast.makeText(context, "Please fill all fields", Toast.LENGTH_SHORT).show()
+                                return@Button
+                            }
+                            
+                            isLoading = true
+                            auth.createUserWithEmailAndPassword(email, password)
+                                .addOnSuccessListener { authResult ->
+                                    val uid = authResult.user?.uid ?: ""
+                                    val user = User(
+                                        id = uid,
+                                        name = fullName,
+                                        email = email,
+                                        studentId = studentId
+                                    )
+                                    
+                                    firestore.collection("users").document(uid).set(user)
+                                        .addOnSuccessListener {
+                                            isLoading = false
+                                            Toast.makeText(context, "Registration Successful", Toast.LENGTH_SHORT).show()
+                                            onRegisterClick()
+                                        }
+                                        .addOnFailureListener { e ->
+                                            isLoading = false
+                                            Toast.makeText(context, "Firestore Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                                        }
+                                }
+                                .addOnFailureListener { e ->
+                                    isLoading = false
+                                    // Handle the CONFIGURATION_NOT_FOUND error by alerting user to console settings
+                                    if (e.message?.contains("CONFIGURATION_NOT_FOUND") == true) {
+                                        Toast.makeText(context, "Auth Setup Error: Disable Email Enumeration Protection in Firebase Console", Toast.LENGTH_LONG).show()
+                                    } else {
+                                        Toast.makeText(context, "Auth Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                        },
+                        modifier = Modifier.fillMaxWidth().height(64.dp),
                         shape = RoundedCornerShape(50),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = Color(0xFF002045)
-                        ),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF002045)),
                         elevation = ButtonDefaults.buttonElevation(defaultElevation = 4.dp),
-                        enabled = termsAccepted
+                        enabled = termsAccepted && !isLoading
                     ) {
-                        Text(
-                            "Create Account",
-                            style = MaterialTheme.typography.titleMedium.copy(
-                                fontWeight = FontWeight.Bold,
-                                color = Color.White,
-                                fontSize = 18.sp
-                            )
-                        )
+                        if (isLoading) {
+                            CircularProgressIndicator(color = Color.White, modifier = Modifier.size(24.dp))
+                        } else {
+                            Text("Create Account", style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold, color = Color.White, fontSize = 18.sp))
+                        }
                     }
                 }
             }
 
             Spacer(modifier = Modifier.height(32.dp))
 
-            // Footer
             TextButton(onClick = onLoginClick) {
                 Text(
                     text = buildAnnotatedString {
-                        withStyle(style = SpanStyle(color = Color(0xFF43474E))) {
-                            append("Already have an account? ")
-                        }
-                        withStyle(style = SpanStyle(color = Color(0xFF002045), fontWeight = FontWeight.Bold)) {
-                            append("Log in")
-                        }
+                        withStyle(style = SpanStyle(color = Color(0xFF43474E))) { append("Already have an account? ") }
+                        withStyle(style = SpanStyle(color = Color(0xFF002045), fontWeight = FontWeight.Bold)) { append("Log in") }
                     },
                     style = MaterialTheme.typography.bodyMedium
                 )
             }
-
             Spacer(modifier = Modifier.height(24.dp))
         }
     }
@@ -299,23 +312,12 @@ fun RegisterInputField(
     keyboardType: KeyboardType = KeyboardType.Text
 ) {
     Column {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelLarge.copy(
-                fontWeight = FontWeight.Bold,
-                color = Color(0xFF181C1E)
-            )
-        )
+        Text(text = label, style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold, color = Color(0xFF181C1E)))
         Spacer(modifier = Modifier.height(8.dp))
         OutlinedTextField(
             value = value,
             onValueChange = onValueChange,
-            placeholder = {
-                Text(
-                    placeholder,
-                    color = Color(0xFFC4C6CF)
-                )
-            },
+            placeholder = { Text(placeholder, color = Color(0xFFC4C6CF)) },
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(12.dp),
             keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
@@ -326,13 +328,5 @@ fun RegisterInputField(
                 unfocusedBorderColor = Color.Transparent,
             )
         )
-    }
-}
-
-@Preview(showBackground = true)
-@Composable
-fun RegisterScreenPreview() {
-    AttendanceGeoFenceTheme {
-        RegisterScreen()
     }
 }

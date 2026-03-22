@@ -2,17 +2,45 @@ package com.example.attendancegeofence.ui.screens
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
-import androidx.compose.material.icons.outlined.*
-import androidx.compose.material3.*
+import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.CalendarToday
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.outlined.History
+import androidx.compose.material.icons.outlined.Home
+import androidx.compose.material.icons.outlined.LocationOn
+import androidx.compose.material.icons.outlined.Notifications
+import androidx.compose.material.icons.outlined.Person
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -24,58 +52,92 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavController
 import androidx.navigation.compose.rememberNavController
+import com.example.attendancegeofence.data.models.Course
+import com.example.attendancegeofence.data.models.Session
 import com.example.attendancegeofence.ui.theme.AttendanceGeoFenceTheme
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.FirebaseFirestore
+import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.Date
+import java.util.Locale
 
 data class CalendarDate(
     val day: String,
     val date: String,
-    val isActive: Boolean = false
-)
-
-data class ClassPeriod(
-    val timeStart: String,
-    val timeEnd: String,
-    val title: String,
-    val location: String,
-    val instructor: String,
-    val type: String, // LECTURE, ONGOING, WORKSHOP
-    val isOngoing: Boolean = false
+    val isActive: Boolean = false,
+    val fullDate: Date
 )
 
 @Composable
 fun ScheduleScreen(navController: NavController) {
-    val dates = listOf(
-        CalendarDate("MON", "14"),
-        CalendarDate("TUE", "15", true),
-        CalendarDate("WED", "16"),
-        CalendarDate("THU", "17"),
-        CalendarDate("FRI", "18")
-    )
+    val firestore = remember { FirebaseFirestore.getInstance() }
+    val auth = remember { FirebaseAuth.getInstance() }
 
-    val classes = listOf(
-        ClassPeriod(
-            "09:00", "10:30 AM",
-            "Advanced Thermodynamics & Fluid Mechanics",
-            "Hall 4B • Engineering Bldg",
-            "Dr. Julian Vance",
-            "LECTURE"
-        ),
-        ClassPeriod(
-            "11:00", "12:30 PM",
-            "Human-Computer Interaction Seminar",
-            "Lab 202 • Innovation Hub",
-            "Prof. Sarah Chen",
-            "ONGOING",
-            isOngoing = true
-        ),
-        ClassPeriod(
-            "14:00", "16:00 PM",
-            "Digital Signal Processing & Systems",
-            "South Wing • Room 12",
-            "Mr. Marcus Roe",
-            "WORKSHOP"
-        )
-    )
+    var selectedDate by remember { mutableStateOf(Calendar.getInstance().time) }
+    var sessions by remember { mutableStateOf<List<Session>>(emptyList()) }
+    var coursesMap by remember { mutableStateOf<Map<String, Course>>(emptyMap()) }
+    var isLoading by remember { mutableStateOf(true) }
+
+    // Generate dynamic dates for the calendar strip (Current week)
+    val dates = remember {
+        val calendar = Calendar.getInstance()
+        val currentDay = calendar.get(Calendar.DAY_OF_YEAR)
+        calendar.set(Calendar.DAY_OF_WEEK, Calendar.MONDAY)
+        (0..4).map {
+            val date = calendar.time
+            val isToday = calendar.get(Calendar.DAY_OF_YEAR) == currentDay
+            val item = CalendarDate(
+                day = SimpleDateFormat("EEE", Locale.getDefault()).format(date).uppercase(),
+                date = SimpleDateFormat("dd", Locale.getDefault()).format(date),
+                isActive = isToday,
+                fullDate = date
+            )
+            calendar.add(Calendar.DAY_OF_MONTH, 1)
+            item
+        }
+    }
+
+    LaunchedEffect(selectedDate) {
+        isLoading = true
+        val calendar = Calendar.getInstance()
+        calendar.time = selectedDate
+        calendar.set(Calendar.HOUR_OF_DAY, 0)
+        calendar.set(Calendar.MINUTE, 0)
+        calendar.set(Calendar.SECOND, 0)
+        val startOfDay = calendar.time
+
+        calendar.set(Calendar.HOUR_OF_DAY, 23)
+        calendar.set(Calendar.MINUTE, 59)
+        calendar.set(Calendar.SECOND, 59)
+        val endOfDay = calendar.time
+
+        firestore.collection("sessions")
+            .whereGreaterThanOrEqualTo("startTime", com.google.firebase.Timestamp(startOfDay))
+            .whereLessThanOrEqualTo("startTime", com.google.firebase.Timestamp(endOfDay))
+            .get()
+            .addOnSuccessListener { sessionDocs ->
+                val fetchedSessions = sessionDocs.toObjects(Session::class.java)
+                    .sortedBy { it.startTime }
+                sessions = fetchedSessions
+
+                val courseIds = fetchedSessions.map { it.courseId }.distinct()
+                if (courseIds.isNotEmpty()) {
+                    firestore.collection("courses")
+                        .whereIn(com.google.firebase.firestore.FieldPath.documentId(), courseIds)
+                        .get()
+                        .addOnSuccessListener { courseDocs ->
+                            coursesMap =
+                                courseDocs.toObjects(Course::class.java).associateBy { it.id }
+                            isLoading = false
+                        }
+                        .addOnFailureListener { isLoading = false }
+                } else {
+                    isLoading = false
+                }
+            }
+            .addOnFailureListener { isLoading = false }
+    }
 
     Scaffold(
         containerColor = Color(0xFFF7FAFC),
@@ -93,22 +155,67 @@ fun ScheduleScreen(navController: NavController) {
                 Spacer(modifier = Modifier.height(32.dp))
                 ScheduleHeader()
                 Spacer(modifier = Modifier.height(32.dp))
-                CalendarStrip(dates)
+                CalendarStrip(dates) { date ->
+                    selectedDate = date
+                }
                 Spacer(modifier = Modifier.height(40.dp))
-                SectionTitle(title = "Today's Classes")
+                SectionTitle(title = "Class Schedule")
                 Spacer(modifier = Modifier.height(24.dp))
             }
 
-            items(classes) { classItem ->
-                ClassCard(classItem)
-                Spacer(modifier = Modifier.height(16.dp))
+            if (isLoading) {
+                item {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(40.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator(color = Color(0xFF002045))
+                    }
+                }
+            } else if (sessions.isEmpty()) {
+                item {
+                    Text(
+                        text = "No classes scheduled for this day.",
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 40.dp),
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                        color = Color.Gray
+                    )
+                }
+            } else {
+                items(sessions) { session ->
+                    val course = coursesMap[session.courseId]
+                    val isOngoing = isSessionOngoing(session)
+                    ClassCard(
+                        timeStart = formatTime(session.startTime.toDate()),
+                        timeEnd = formatTime(session.endTime.toDate()),
+                        title = course?.title ?: "Unknown Course",
+                        location = session.location,
+                        instructor = session.instructor,
+                        type = session.type,
+                        isOngoing = isOngoing
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                }
             }
-            
+
             item {
                 Spacer(modifier = Modifier.height(32.dp))
             }
         }
     }
+}
+
+private fun formatTime(date: Date): String {
+    return SimpleDateFormat("hh:mm a", Locale.getDefault()).format(date)
+}
+
+private fun isSessionOngoing(session: Session): Boolean {
+    val now = Date()
+    return now.after(session.startTime.toDate()) && now.before(session.endTime.toDate())
 }
 
 @Composable
@@ -123,7 +230,7 @@ fun ScheduleTopBar() {
                 modifier = Modifier
                     .size(40.dp)
                     .clip(CircleShape)
-                    .background(Color(0xFFE0E3E5)) // placeholder for student image
+                    .background(Color(0xFFE0E3E5))
             )
             Spacer(modifier = Modifier.width(12.dp))
             Text(
@@ -167,26 +274,36 @@ fun ScheduleHeader() {
 }
 
 @Composable
-fun CalendarStrip(dates: List<CalendarDate>) {
+fun CalendarStrip(dates: List<CalendarDate>, onDateSelected: (Date) -> Unit) {
+    var activeDate by remember {
+        mutableStateOf(
+            dates.find { it.isActive }?.fullDate ?: dates[0].fullDate
+        )
+    }
+
     LazyRow(
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         contentPadding = PaddingValues(vertical = 4.dp)
     ) {
         items(dates) { date ->
-            DateItem(date)
+            DateItem(date, isActive = date.fullDate == activeDate) {
+                activeDate = date.fullDate
+                onDateSelected(date.fullDate)
+            }
         }
     }
 }
 
 @Composable
-fun DateItem(date: CalendarDate) {
-    if (date.isActive) {
+fun DateItem(date: CalendarDate, isActive: Boolean, onClick: () -> Unit) {
+    if (isActive) {
         Column(
             modifier = Modifier
                 .width(84.dp)
                 .height(112.dp)
                 .clip(RoundedCornerShape(16.dp))
                 .background(Color(0xFF002045))
+                .clickable { onClick() }
                 .padding(vertical = 12.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
@@ -222,6 +339,7 @@ fun DateItem(date: CalendarDate) {
                 .height(96.dp)
                 .clip(RoundedCornerShape(16.dp))
                 .background(Color(0xFFF1F4F6))
+                .clickable { onClick() }
                 .padding(vertical = 12.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
@@ -267,7 +385,15 @@ fun SectionTitle(title: String) {
 }
 
 @Composable
-fun ClassCard(item: ClassPeriod) {
+fun ClassCard(
+    timeStart: String,
+    timeEnd: String,
+    title: String,
+    location: String,
+    instructor: String,
+    type: String,
+    isOngoing: Boolean
+) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(20.dp),
@@ -275,16 +401,16 @@ fun ClassCard(item: ClassPeriod) {
         shadowElevation = 2.dp
     ) {
         Box {
-            if (item.isOngoing) {
+            if (isOngoing) {
                 Box(
                     modifier = Modifier
-                        .fillMaxHeight()
+                        .matchParentSize()
                         .width(4.dp)
                         .background(Color(0xFFFE6B00))
                         .align(Alignment.CenterStart)
                 )
             }
-            
+
             Column(
                 modifier = Modifier.padding(24.dp)
             ) {
@@ -295,22 +421,22 @@ fun ClassCard(item: ClassPeriod) {
                 ) {
                     Column {
                         Text(
-                            text = item.timeStart,
+                            text = timeStart,
                             style = MaterialTheme.typography.headlineMedium.copy(
                                 fontWeight = FontWeight.ExtraBold,
-                                color = if (item.isOngoing) Color(0xFFA04100) else Color(0xFF002045),
+                                color = if (isOngoing) Color(0xFFA04100) else Color(0xFF002045),
                                 fontSize = 28.sp
                             )
                         )
                         Text(
-                            text = item.timeEnd,
+                            text = timeEnd,
                             style = MaterialTheme.typography.bodySmall.copy(
                                 color = Color(0xFF43474E),
                                 fontWeight = FontWeight.Medium
                             )
                         )
                     }
-                    if (item.isOngoing) {
+                    if (isOngoing) {
                         Icon(
                             imageVector = Icons.Default.Bolt,
                             contentDescription = "Ongoing",
@@ -328,17 +454,17 @@ fun ClassCard(item: ClassPeriod) {
                 }
 
                 Spacer(modifier = Modifier.height(16.dp))
-                
+
                 Surface(
                     shape = RoundedCornerShape(4.dp),
-                    color = if (item.isOngoing) Color(0xFFFE6B00) else Color(0xFFF1F4F6),
+                    color = if (isOngoing) Color(0xFFFE6B00) else Color(0xFFF1F4F6),
                 ) {
                     Text(
-                        text = item.type,
+                        text = type,
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
                         style = MaterialTheme.typography.labelSmall.copy(
                             fontWeight = FontWeight.Bold,
-                            color = if (item.isOngoing) Color.White else Color(0xFF43474E),
+                            color = if (isOngoing) Color.White else Color(0xFF43474E),
                             letterSpacing = 0.5.sp
                         )
                     )
@@ -347,7 +473,7 @@ fun ClassCard(item: ClassPeriod) {
                 Spacer(modifier = Modifier.height(16.dp))
 
                 Text(
-                    text = item.title,
+                    text = title,
                     style = MaterialTheme.typography.titleLarge.copy(
                         fontWeight = FontWeight.Bold,
                         color = Color(0xFF181C1E),
@@ -359,8 +485,8 @@ fun ClassCard(item: ClassPeriod) {
                 Spacer(modifier = Modifier.height(16.dp))
 
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    InfoTag(icon = Icons.Outlined.LocationOn, text = item.location)
-                    InfoTag(icon = Icons.Outlined.Person, text = item.instructor)
+                    InfoTag(icon = Icons.Outlined.LocationOn, text = location)
+                    InfoTag(icon = Icons.Outlined.Person, text = instructor)
                 }
             }
         }
@@ -412,19 +538,23 @@ fun ScheduleBottomNavigation(navController: NavController) {
             verticalAlignment = Alignment.Bottom
         ) {
             ScheduleBottomNavItem(
-                icon = Icons.Outlined.Home, 
-                label = "HOME", 
+                icon = Icons.Outlined.Home,
+                label = "HOME",
                 onClick = { navController.navigate("home") }
             )
-            ScheduleBottomNavItem(icon = Icons.Default.CalendarToday, label = "SCHEDULE", isSelected = true, onClick = {})
             ScheduleBottomNavItem(
-                icon = Icons.Outlined.LocationOn, 
-                label = "CHECK-IN", 
+                icon = Icons.Default.CalendarToday,
+                label = "SCHEDULE",
+                isSelected = true,
+                onClick = {})
+            ScheduleBottomNavItem(
+                icon = Icons.Outlined.LocationOn,
+                label = "CHECK-IN",
                 onClick = { navController.navigate("checkin") }
             )
             ScheduleBottomNavItem(
-                icon = Icons.Outlined.History, 
-                label = "HISTORY", 
+                icon = Icons.Outlined.History,
+                label = "HISTORY",
                 onClick = { navController.navigate("history") }
             )
         }
@@ -432,7 +562,12 @@ fun ScheduleBottomNavigation(navController: NavController) {
 }
 
 @Composable
-fun ScheduleBottomNavItem(icon: ImageVector, label: String, isSelected: Boolean = false, onClick: () -> Unit) {
+fun ScheduleBottomNavItem(
+    icon: ImageVector,
+    label: String,
+    isSelected: Boolean = false,
+    onClick: () -> Unit
+) {
     if (isSelected) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,

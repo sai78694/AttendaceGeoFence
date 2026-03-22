@@ -1,5 +1,6 @@
 package com.example.attendancegeofence.ui.screens
 
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -15,6 +16,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -27,19 +29,26 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.attendancegeofence.ui.theme.AttendanceGeoFenceTheme
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.FirebaseFirestore
 
 @Composable
 fun LoginScreen(
     onLoginClick: (String, String) -> Unit = { _, _ -> },
     onSignUpClick: () -> Unit = {}
 ) {
+    val context = LocalContext.current
     var emailOrId by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var passwordVisible by remember { mutableStateOf(false) }
+    var isLoading by remember { mutableStateOf(false) }
+
+    val auth = remember { FirebaseAuth.getInstance() }
+    val firestore = remember { FirebaseFirestore.getInstance() }
 
     Scaffold(
         modifier = Modifier.fillMaxSize(),
-        containerColor = Color(0xFFF7FAFC) // Tailwind surface
+        containerColor = Color(0xFFF7FAFC)
     ) { innerPadding ->
         Column(
             modifier = Modifier
@@ -190,24 +199,75 @@ fun LoginScreen(
 
                     // Login Button
                     Button(
-                        onClick = { onLoginClick(emailOrId, password) },
+                        onClick = {
+                            if (emailOrId.isEmpty() || password.isEmpty()) {
+                                Toast.makeText(context, "Please enter credentials", Toast.LENGTH_SHORT).show()
+                                return@Button
+                            }
+
+                            isLoading = true
+
+                            if (emailOrId.contains("@")) {
+                                // Assume Email Login
+                                auth.signInWithEmailAndPassword(emailOrId, password)
+                                    .addOnSuccessListener {
+                                        isLoading = false
+                                        onLoginClick(emailOrId, password)
+                                    }
+                                    .addOnFailureListener { e ->
+                                        isLoading = false
+                                        Toast.makeText(context, "Login Failed: ${e.message}", Toast.LENGTH_SHORT).show()
+                                    }
+                            } else {
+                                // Assume Student ID Login - Query Firestore for email
+                                firestore.collection("users")
+                                    .whereEqualTo("studentId", emailOrId)
+                                    .get()
+                                    .addOnSuccessListener { documents ->
+                                        if (documents.isEmpty) {
+                                            isLoading = false
+                                            Toast.makeText(context, "Student ID not found", Toast.LENGTH_SHORT).show()
+                                        } else {
+                                            val emailFromFirestore = documents.documents[0].getString("email") ?: ""
+                                            auth.signInWithEmailAndPassword(emailFromFirestore, password)
+                                                .addOnSuccessListener {
+                                                    isLoading = false
+                                                    onLoginClick(emailOrId, password)
+                                                }
+                                                .addOnFailureListener { e ->
+                                                    isLoading = false
+                                                    Toast.makeText(context, "Login Failed: ${e.message}", Toast.LENGTH_SHORT).show()
+                                                }
+                                        }
+                                    }
+                                    .addOnFailureListener { e ->
+                                        isLoading = false
+                                        Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                                    }
+                            }
+                        },
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(64.dp),
+                        enabled = !isLoading,
                         shape = RoundedCornerShape(50),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = Color(0xFF002045)
                         ),
                         elevation = ButtonDefaults.buttonElevation(defaultElevation = 4.dp)
                     ) {
-                        Text(
-                            "Login",
-                            style = MaterialTheme.typography.titleMedium.copy(
-                                fontWeight = FontWeight.Bold,
-                                color = Color.White,
-                                fontSize = 18.sp
+                        if (isLoading) {
+                            CircularProgressIndicator(color = Color.White, modifier = Modifier.size(24.dp))
+                        } else {
+                            Text(
+                                "Login",
+                                style = MaterialTheme.typography.titleMedium.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White,
+                                    fontSize = 18.sp
+                                )
                             )
-                        )
+                        }
                     }
                 }
             }

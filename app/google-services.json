@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "259687700464",
+    "project_id": "attendancegeo-8fdfe",
+    "storage_bucket": "attendancegeo-8fdfe.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:259687700464:android:2b2ee36d2ea4be1344af35",
+        "android_client_info": {
+          "package_name": "com.example.attendancegeofence"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBR5AoAdODlpzWdIMDPkZIBaEAE-qwUuSg"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

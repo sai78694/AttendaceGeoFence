@@ -10,115 +10,185 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.automirrored.filled.ArrowForwardIos
+import androidx.compose.material.icons.automirrored.filled.TrendingUp
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavController
 import androidx.navigation.compose.rememberNavController
+import com.example.attendancegeofence.data.models.Course
+import com.example.attendancegeofence.data.models.Session
 import com.example.attendancegeofence.ui.theme.AttendanceGeoFenceTheme
-
-data class TodayClass(
-    val title: String,
-    val time: String,
-    val location: String,
-    val icon: ImageVector
-)
-
-data class CourseBrief(
-    val code: String,
-    val percentage: String,
-    val color: Color
-)
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.FirebaseFirestore
+import java.text.SimpleDateFormat
+import java.util.*
 
 @Composable
 fun HomeScreen(navController: NavController) {
-    val todayClasses = listOf(
-        TodayClass("Computer Science", "10:00 AM", "Room 402", Icons.Default.Computer),
-        TodayClass("Psychology", "02:00 PM", "Auditorium B", Icons.Default.Psychology)
-    )
+    val firestore = remember { FirebaseFirestore.getInstance() }
+    val auth = remember { FirebaseAuth.getInstance() }
+    
+    var userName by remember { mutableStateOf("User") }
+    var sessions by remember { mutableStateOf<List<Session>>(emptyList()) }
+    var coursesMap by remember { mutableStateOf<Map<String, Course>>(emptyMap()) }
+    var isLoading by remember { mutableStateOf(true) }
 
-    val courseAttendance = listOf(
-        CourseBrief("CS 101", "98%", Color(0xFF002045)),
-        CourseBrief("PSY 204", "92%", Color(0xFF002045))
-    )
+    LaunchedEffect(Unit) {
+        val uid = auth.currentUser?.uid
+        if (uid != null) {
+            // Fetch User Profile
+            firestore.collection("users").document(uid).get().addOnSuccessListener {
+                userName = it.getString("name") ?: "User"
+            }
+        }
+
+        // Fetch Today's Sessions
+        val calendar = Calendar.getInstance()
+        calendar.set(Calendar.HOUR_OF_DAY, 0)
+        calendar.set(Calendar.MINUTE, 0)
+        calendar.set(Calendar.SECOND, 0)
+        val startOfDay = calendar.time
+        
+        calendar.set(Calendar.HOUR_OF_DAY, 23)
+        calendar.set(Calendar.MINUTE, 59)
+        calendar.set(Calendar.SECOND, 59)
+        val endOfDay = calendar.time
+
+        firestore.collection("sessions")
+            .whereGreaterThanOrEqualTo("startTime", com.google.firebase.Timestamp(startOfDay))
+            .whereLessThanOrEqualTo("startTime", com.google.firebase.Timestamp(endOfDay))
+            .get()
+            .addOnSuccessListener { sessionDocs ->
+                val fetchedSessions = sessionDocs.toObjects(Session::class.java)
+                sessions = fetchedSessions
+
+                // Fetch Unique Courses for these sessions
+                val courseIds = fetchedSessions.map { it.courseId }.distinct()
+                if (courseIds.isNotEmpty()) {
+                    firestore.collection("courses")
+                        .whereIn(com.google.firebase.firestore.FieldPath.documentId(), courseIds)
+                        .get()
+                        .addOnSuccessListener { courseDocs ->
+                            coursesMap = courseDocs.toObjects(Course::class.java).associateBy { it.id }
+                            isLoading = false
+                        }
+                        .addOnFailureListener {
+                            isLoading = false
+                        }
+                } else {
+                    isLoading = false
+                }
+            }
+            .addOnFailureListener {
+                isLoading = false
+            }
+    }
 
     Scaffold(
         containerColor = Color(0xFFF7FAFC),
         bottomBar = { HomeBottomNavigation(navController) }
     ) { innerPadding ->
-        LazyColumn(
-            modifier = Modifier
-                .padding(innerPadding)
-                .fillMaxSize()
-                .padding(horizontal = 24.dp)
-        ) {
-            item {
-                Spacer(modifier = Modifier.height(16.dp))
-                HomeTopBar()
-                Spacer(modifier = Modifier.height(40.dp))
-                HomeHeader()
-                Spacer(modifier = Modifier.height(16.dp))
-                HomeSubHeader()
-                Spacer(modifier = Modifier.height(40.dp))
-                
-                SectionHeader(
-                    title = "Today's Classes",
-                    actionText = "Full Schedule",
-                    onActionClick = { navController.navigate("schedule") }
-                )
-                Spacer(modifier = Modifier.height(16.dp))
+        if (isLoading) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(color = Color(0xFF002045))
             }
-
-            items(todayClasses) { item ->
-                TodayClassCard(item)
-                Spacer(modifier = Modifier.height(12.dp))
-            }
-
-            item {
-                Spacer(modifier = Modifier.height(32.dp))
-                Text(
-                    text = "Course Attendance",
-                    style = MaterialTheme.typography.titleLarge.copy(
-                        fontWeight = FontWeight.Bold,
-                        color = Color(0xFF181C1E)
+        } else {
+            LazyColumn(
+                modifier = Modifier
+                    .padding(innerPadding)
+                    .fillMaxSize()
+                    .padding(horizontal = 24.dp)
+            ) {
+                item {
+                    Spacer(modifier = Modifier.height(16.dp))
+                    HomeTopBar(userName)
+                    Spacer(modifier = Modifier.height(40.dp))
+                    HomeHeader()
+                    Spacer(modifier = Modifier.height(16.dp))
+                    HomeSubHeader(sessions.size)
+                    Spacer(modifier = Modifier.height(40.dp))
+                    
+                    SectionHeader(
+                        title = "Today's Classes",
+                        actionText = "Full Schedule",
+                        onActionClick = { navController.navigate("schedule") }
                     )
-                )
-                Spacer(modifier = Modifier.height(16.dp))
-                
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(16.dp)
-                ) {
-                    courseAttendance.forEach { brief ->
-                        AttendanceBriefCard(brief, modifier = Modifier.weight(1f))
+                    Spacer(modifier = Modifier.height(16.dp))
+                }
+
+                if (sessions.isEmpty()) {
+                    item {
+                        Text(
+                            "No classes scheduled for today.",
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 20.dp),
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                            color = Color.Gray
+                        )
+                    }
+                } else {
+                    items(sessions) { session ->
+                        val course = coursesMap[session.courseId]
+                        TodayClassCard(
+                            title = course?.title ?: "Unknown Course",
+                            time = formatTime(session.startTime.toDate()),
+                            location = session.location,
+                            icon = getIconForName(course?.iconName)
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
                     }
                 }
-                
-                Spacer(modifier = Modifier.height(24.dp))
-                
-                AttendanceWarningCard(
-                    message = "Math 301 is approaching the minimum 80% threshold."
-                )
-                
-                Spacer(modifier = Modifier.height(32.dp))
+
+                item {
+                    Spacer(modifier = Modifier.height(32.dp))
+                    Text(
+                        text = "Recent Performance",
+                        style = MaterialTheme.typography.titleLarge.copy(
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF181C1E)
+                        )
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    
+                    AttendanceWarningCard(
+                        message = "Keep it up! Your average attendance is 94% across all registered modules."
+                    )
+                    
+                    Spacer(modifier = Modifier.height(32.dp))
+                }
             }
         }
     }
 }
 
+private fun formatTime(date: Date): String {
+    return SimpleDateFormat("hh:mm a", Locale.getDefault()).format(date)
+}
+
+private fun getIconForName(name: String?): ImageVector {
+    return when (name?.lowercase()) {
+        "computer" -> Icons.Default.Computer
+        "psychology" -> Icons.Default.Psychology
+        "school" -> Icons.Default.School
+        "trending_up" -> Icons.AutoMirrored.Filled.TrendingUp
+        "calculate" -> Icons.Default.Calculate
+        "balance" -> Icons.Default.Balance
+        else -> Icons.Default.Book
+    }
+}
+
 @Composable
-fun HomeTopBar() {
+fun HomeTopBar(name: String) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
@@ -141,7 +211,7 @@ fun HomeTopBar() {
                     )
                 )
                 Text(
-                    text = "Alex Rivers",
+                    text = name,
                     style = MaterialTheme.typography.bodySmall.copy(
                         color = Color(0xFF43474E),
                         fontWeight = FontWeight.Medium
@@ -186,7 +256,7 @@ fun HomeHeader() {
             style = MaterialTheme.typography.headlineLarge.copy(
                 fontWeight = FontWeight.ExtraBold,
                 fontSize = 48.sp,
-                color = Color(0xFFA04100), // Secondary color
+                color = Color(0xFFA04100),
                 letterSpacing = (-1).sp,
                 lineHeight = 48.sp
             )
@@ -195,9 +265,9 @@ fun HomeHeader() {
 }
 
 @Composable
-fun HomeSubHeader() {
+fun HomeSubHeader(classCount: Int) {
     Text(
-        text = "You have 2 classes scheduled for today and your attendance rate is currently exceeding your semester goal.",
+        text = "You have $classCount classes scheduled for today. Access your full schedule to view details and mark attendance.",
         style = MaterialTheme.typography.bodyLarge.copy(
             color = Color(0xFF74777F),
             fontWeight = FontWeight.Medium,
@@ -243,7 +313,7 @@ fun SectionHeader(title: String, actionText: String, onActionClick: () -> Unit) 
 }
 
 @Composable
-fun TodayClassCard(item: TodayClass) {
+fun TodayClassCard(title: String, time: String, location: String, icon: ImageVector) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(24.dp),
@@ -261,7 +331,7 @@ fun TodayClassCard(item: TodayClass) {
             ) {
                 Box(contentAlignment = Alignment.Center) {
                     Icon(
-                        imageVector = item.icon,
+                        imageVector = icon,
                         contentDescription = null,
                         tint = Color(0xFF1A365D),
                         modifier = Modifier.size(24.dp)
@@ -271,14 +341,14 @@ fun TodayClassCard(item: TodayClass) {
             Spacer(modifier = Modifier.width(16.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = item.title,
+                    text = title,
                     style = MaterialTheme.typography.titleMedium.copy(
                         fontWeight = FontWeight.Bold,
                         color = Color(0xFF002045)
                     )
                 )
                 Text(
-                    text = "${item.time} • ${item.location}",
+                    text = "$time • $location",
                     style = MaterialTheme.typography.bodySmall.copy(
                         color = Color(0xFF74777F),
                         fontWeight = FontWeight.Medium
@@ -296,73 +366,27 @@ fun TodayClassCard(item: TodayClass) {
 }
 
 @Composable
-fun AttendanceBriefCard(brief: CourseBrief, modifier: Modifier = Modifier) {
-    Surface(
-        modifier = modifier,
-        shape = RoundedCornerShape(24.dp),
-        color = Color(0xFFEBEEF0).copy(alpha = 0.5f)
-    ) {
-        Column(
-            modifier = Modifier.padding(20.dp)
-        ) {
-            Text(
-                text = brief.code,
-                style = MaterialTheme.typography.labelSmall.copy(
-                    color = Color(0xFF43474E),
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 0.5.sp
-                )
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = brief.percentage,
-                style = MaterialTheme.typography.headlineMedium.copy(
-                    color = Color(0xFF002045),
-                    fontWeight = FontWeight.ExtraBold,
-                    fontSize = 32.sp
-                )
-            )
-            Spacer(modifier = Modifier.height(12.dp))
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(4.dp)
-                    .clip(RoundedCornerShape(2.dp))
-                    .background(Color(0xFFE0E3E5))
-            ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth(0.8f) // placeholder progress
-                        .fillMaxHeight()
-                        .background(brief.color)
-                )
-            }
-        }
-    }
-}
-
-@Composable
 fun AttendanceWarningCard(message: String) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(20.dp),
-        color = Color(0xFFFDE7D9) // Light orange themed background
+        color = Color(0xFFEBEEF0).copy(alpha = 0.5f)
     ) {
         Row(
             modifier = Modifier.padding(20.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(
-                imageVector = Icons.Default.Warning,
+                imageVector = Icons.Default.Info,
                 contentDescription = null,
-                tint = Color(0xFFA04100),
+                tint = Color(0xFF1A365D),
                 modifier = Modifier.size(24.dp)
             )
             Spacer(modifier = Modifier.width(16.dp))
             Text(
                 text = message,
                 style = MaterialTheme.typography.bodyMedium.copy(
-                    color = Color(0xFF572000),
+                    color = Color(0xFF1A365D),
                     fontWeight = FontWeight.Medium,
                     lineHeight = 20.sp
                 )
@@ -408,12 +432,7 @@ fun HomeBottomNavigation(navController: NavController) {
 }
 
 @Composable
-fun HomeBottomNavItem(
-    icon: ImageVector,
-    label: String,
-    isSelected: Boolean = false,
-    onClick: () -> Unit
-) {
+fun HomeBottomNavItem(icon: ImageVector, label: String, isSelected: Boolean = false, onClick: () -> Unit) {
     if (isSelected) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
