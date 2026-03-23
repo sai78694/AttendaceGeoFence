@@ -7,6 +7,8 @@ import android.util.Log
 import com.google.android.gms.location.Geofence
 import com.google.android.gms.location.GeofenceStatusCodes
 import com.google.android.gms.location.GeofencingEvent
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.FirebaseFirestore
 
 class GeofenceBroadcastReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context?, intent: Intent?) {
@@ -21,20 +23,41 @@ class GeofenceBroadcastReceiver : BroadcastReceiver() {
         }
 
         val geofenceTransition = geofencingEvent.geofenceTransition
+        val triggeringGeofences = geofencingEvent.triggeringGeofences ?: return
 
-        when (geofenceTransition) {
-            Geofence.GEOFENCE_TRANSITION_ENTER -> {
-                Log.d("GeofenceReceiver", "GEOFENCE_TRANSITION_ENTER triggered")
-                // TODO: Update app state or send notification to mark attendance
-            }
-            Geofence.GEOFENCE_TRANSITION_EXIT -> {
-                Log.d("GeofenceReceiver", "GEOFENCE_TRANSITION_EXIT triggered")
-            }
-            Geofence.GEOFENCE_TRANSITION_DWELL -> {
-                Log.d("GeofenceReceiver", "GEOFENCE_TRANSITION_DWELL triggered")
-            }
-            else -> {
-                Log.e("GeofenceReceiver", "Unknown transition: $geofenceTransition")
+        val firestore = FirebaseFirestore.getInstance()
+        val auth = FirebaseAuth.getInstance()
+        val userId = auth.currentUser?.uid ?: return
+
+        for (geofence in triggeringGeofences) {
+            val sessionId = geofence.requestId
+
+            when (geofenceTransition) {
+                Geofence.GEOFENCE_TRANSITION_EXIT -> {
+                    Log.d("GeofenceReceiver", "GEOFENCE_TRANSITION_EXIT for session: $sessionId")
+                    // If they exit before the session ends, mark them as ABSENT
+                    firestore.collection("sessions").document(sessionId).get()
+                        .addOnSuccessListener { document ->
+                            val endTime = document.getTimestamp("endTime")?.toDate()?.time ?: 0
+                            val now = System.currentTimeMillis()
+                            
+                            if (now < endTime) {
+                                // User left early, update status to ABSENT
+                                firestore.collection("attendance")
+                                    .whereEqualTo("userId", userId)
+                                    .whereEqualTo("sessionId", sessionId)
+                                    .get()
+                                    .addOnSuccessListener { querySnapshot ->
+                                        for (doc in querySnapshot.documents) {
+                                            doc.reference.update("status", "ABSENT")
+                                        }
+                                    }
+                            }
+                        }
+                }
+                Geofence.GEOFENCE_TRANSITION_ENTER -> {
+                    Log.d("GeofenceReceiver", "GEOFENCE_TRANSITION_ENTER for session: $sessionId")
+                }
             }
         }
     }

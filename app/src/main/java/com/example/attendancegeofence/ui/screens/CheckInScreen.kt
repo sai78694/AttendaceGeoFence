@@ -124,12 +124,37 @@ fun CheckInScreen(navController: NavController) {
     var userName by remember { mutableStateOf("User") }
     var isLoadingSession by remember { mutableStateOf(true) }
     var timeRemaining by remember { mutableStateOf("--:--") }
+    
+    var hasAlreadyMarkedAttendance by remember { mutableStateOf(false) }
+    var checkingAttendanceStatus by remember { mutableStateOf(true) }
 
     val executor = remember { ContextCompat.getMainExecutor(context) }
     val biometricManager = remember { BiometricManager.from(context) }
     
     // Using ONLY BIOMETRIC_STRONG to force fingerprint/face and remove PIN fallback.
     val authenticators = BiometricManager.Authenticators.BIOMETRIC_STRONG
+
+    // Check if user has already marked attendance for this session
+    LaunchedEffect(currentSession) {
+        val session = currentSession
+        val userId = auth.currentUser?.uid
+        if (session != null && userId != null) {
+            checkingAttendanceStatus = true
+            firestore.collection("attendance")
+                .whereEqualTo("userId", userId)
+                .whereEqualTo("sessionId", session.id)
+                .get()
+                .addOnSuccessListener { querySnapshot ->
+                    hasAlreadyMarkedAttendance = !querySnapshot.isEmpty
+                    checkingAttendanceStatus = false
+                }
+                .addOnFailureListener {
+                    checkingAttendanceStatus = false
+                }
+        } else if (session == null) {
+            checkingAttendanceStatus = false
+        }
+    }
 
     val onMarkAttendance: () -> Unit = {
         val session = currentSession
@@ -149,6 +174,7 @@ fun CheckInScreen(navController: NavController) {
                     .add(attendanceData)
                     .addOnSuccessListener {
                         isSubmitting = false
+                        hasAlreadyMarkedAttendance = true
                         geofenceManager.addGeofence(session.id, session.latitude, session.longitude)
                         Toast.makeText(context, "Attendance Marked Successfully!", Toast.LENGTH_SHORT).show()
                         navController.navigate("history")
@@ -172,9 +198,8 @@ fun CheckInScreen(navController: NavController) {
             Log.d(TAG, "Showing biometric prompt")
             val promptInfo = BiometricPrompt.PromptInfo.Builder()
                 .setTitle("Mark Attendance")
-                .setSubtitle("Confirm identity to continue")
+                .setSubtitle("Confirm identity with fingerprint to continue")
                 .setAllowedAuthenticators(authenticators)
-                // Negative button is required when DEVICE_CREDENTIAL is NOT used
                 .setNegativeButtonText("Cancel")
                 .build()
 
@@ -194,7 +219,6 @@ fun CheckInScreen(navController: NavController) {
                     override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
                         super.onAuthenticationSucceeded(result)
                         Log.d(TAG, "Authentication succeeded")
-                        // onMarkAttendance sets isSubmitting to true and then false
                         onMarkAttendance()
                     }
 
@@ -345,7 +369,7 @@ fun CheckInScreen(navController: NavController) {
 
             Spacer(modifier = Modifier.height(24.dp))
 
-            if (isLoadingSession) {
+            if (isLoadingSession || checkingAttendanceStatus) {
                 Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
                     CircularProgressIndicator(color = Color(0xFF1A365D))
                 }
@@ -384,43 +408,60 @@ fun CheckInScreen(navController: NavController) {
                 MetricsGrid(isWithinRange, distanceToTarget?.toInt() ?: 0, timeRemaining)
 
                 Spacer(modifier = Modifier.height(32.dp))
-                MarkAttendanceButton(
-                    isEnabled = isWithinRange && !isSubmitting,
-                    isLoading = isSubmitting
-                ) {
-                    if (backgroundPermissionGranted) {
-                        val canAuthenticate = biometricManager.canAuthenticate(authenticators)
-                        Log.d(TAG, "Biometric status: $canAuthenticate")
-                        
-                        when (canAuthenticate) {
-                            BiometricManager.BIOMETRIC_SUCCESS -> {
-                                isSubmitting = true
-                                showBiometricPrompt()
-                            }
-                            BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED -> {
-                                Toast.makeText(context, "Please set up a fingerprint to verify your identity.", Toast.LENGTH_LONG).show()
-                            }
-                            else -> {
-                                Log.w(TAG, "Biometric unavailable, falling back. Code: $canAuthenticate")
-                                onMarkAttendance()
-                            }
+                
+                if (hasAlreadyMarkedAttendance) {
+                    Button(
+                        onClick = { },
+                        modifier = Modifier.fillMaxWidth().height(64.dp),
+                        shape = RoundedCornerShape(50),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFFE8F5E9),
+                            contentColor = Color(0xFF2E7D32)
+                        ),
+                        enabled = false
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(imageVector = Icons.Default.CheckCircle, contentDescription = null, modifier = Modifier.size(20.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(text = "Attendance Marked", style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold))
                         }
-                    } else {
-                        Toast.makeText(context, "Background location permission required", Toast.LENGTH_SHORT).show()
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                            backgroundLocationLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+                    }
+                } else {
+                    MarkAttendanceButton(
+                        isEnabled = isWithinRange && !isSubmitting,
+                        isLoading = isSubmitting
+                    ) {
+                        if (backgroundPermissionGranted) {
+                            val canAuthenticate = biometricManager.canAuthenticate(authenticators)
+                            when (canAuthenticate) {
+                                BiometricManager.BIOMETRIC_SUCCESS -> {
+                                    isSubmitting = true
+                                    showBiometricPrompt()
+                                }
+                                BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED -> {
+                                    Toast.makeText(context, "Please set up a fingerprint to verify your identity.", Toast.LENGTH_LONG).show()
+                                }
+                                else -> {
+                                    onMarkAttendance()
+                                }
+                            }
+                        } else {
+                            Toast.makeText(context, "Background location permission required", Toast.LENGTH_SHORT).show()
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                backgroundLocationLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+                            }
                         }
                     }
                 }
 
-                if (!isWithinRange) {
+                if (!isWithinRange && !hasAlreadyMarkedAttendance) {
                     Spacer(modifier = Modifier.height(12.dp))
                     Text(text = "Verification requires proximity and active GPS", style = MaterialTheme.typography.bodySmall.copy(color = Color(0xFF74777F), textAlign = TextAlign.Center))
                 }
 
-                if (isWithinRange) {
+                if (isWithinRange || hasAlreadyMarkedAttendance) {
                     Spacer(modifier = Modifier.height(24.dp))
-                    StatusMessage()
+                    StatusMessage(isMarked = hasAlreadyMarkedAttendance)
                 }
             }
             Spacer(modifier = Modifier.height(32.dp))
@@ -538,12 +579,35 @@ fun MetricCard(modifier: Modifier = Modifier, icon: ImageVector, label: String, 
 }
 
 @Composable
-fun StatusMessage() {
-    Surface(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp), color = Color(0xFFE8F5E9)) {
-        Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(imageVector = Icons.Default.CheckCircle, contentDescription = null, tint = Color(0xFF388E3C), modifier = Modifier.size(24.dp))
+fun StatusMessage(isMarked: Boolean = false) {
+    val bgColor = if (isMarked) Color(0xFFE8F5E9) else Color(0xFFE8F5E9)
+    val tintColor = if (isMarked) Color(0xFF388E3C) else Color(0xFF388E3C)
+    val textColor = if (isMarked) Color(0xFF2E7D32) else Color(0xFF2E7D32)
+    val message = if (isMarked) "Attendance recorded. Please stay in the area until the session ends." else "Signal is strong. Your device is ready for check-in."
+
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        color = bgColor
+    ) {
+        Row(
+            modifier = Modifier.padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Default.CheckCircle,
+                contentDescription = null,
+                tint = tintColor,
+                modifier = Modifier.size(24.dp)
+            )
             Spacer(modifier = Modifier.width(12.dp))
-            Text(text = "Signal is strong. Your device is ready for check-in.", style = MaterialTheme.typography.bodySmall.copy(color = Color(0xFF2E7D32), fontWeight = FontWeight.Medium))
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodySmall.copy(
+                    color = textColor,
+                    fontWeight = FontWeight.Medium
+                )
+            )
         }
     }
 }
