@@ -1,12 +1,16 @@
 package com.example.attendancegeofence.ui.screens
 
 import android.Manifest
+import android.content.Context
+import android.content.ContextWrapper
 import android.content.pm.PackageManager
 import android.os.Build
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.biometric.BiometricManager
+import androidx.biometric.BiometricPrompt
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -67,9 +71,9 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.fragment.app.FragmentActivity
 import androidx.navigation.NavController
 import androidx.navigation.compose.rememberNavController
-import com.example.attendancegeofence.data.models.Attendance
 import com.example.attendancegeofence.data.models.Course
 import com.example.attendancegeofence.data.models.Session
 import com.example.attendancegeofence.geofence.GeofenceManager
@@ -81,15 +85,25 @@ import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.delay
-import java.text.SimpleDateFormat
 import java.util.Date
-import java.util.Locale
 import kotlin.math.PI
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.pow
 import kotlin.math.sin
 import kotlin.math.sqrt
+
+private const val TAG = "CheckInScreen"
+
+// Helper function to find the FragmentActivity from the current context
+fun Context.findFragmentActivity(): FragmentActivity? {
+    var context = this
+    while (context is ContextWrapper) {
+        if (context is FragmentActivity) return context
+        context = context.baseContext
+    }
+    return null
+}
 
 @Composable
 fun CheckInScreen(navController: NavController) {
@@ -111,6 +125,94 @@ fun CheckInScreen(navController: NavController) {
     var isLoadingSession by remember { mutableStateOf(true) }
     var timeRemaining by remember { mutableStateOf("--:--") }
 
+    val executor = remember { ContextCompat.getMainExecutor(context) }
+    val biometricManager = remember { BiometricManager.from(context) }
+    
+    // Using ONLY BIOMETRIC_STRONG to force fingerprint/face and remove PIN fallback.
+    val authenticators = BiometricManager.Authenticators.BIOMETRIC_STRONG
+
+    val onMarkAttendance: () -> Unit = {
+        val session = currentSession
+        if (session != null) {
+            val userId = auth.currentUser?.uid
+            if (userId != null) {
+                isSubmitting = true
+                val attendanceData = hashMapOf(
+                    "userId" to userId,
+                    "courseId" to session.courseId,
+                    "sessionId" to session.id,
+                    "timestamp" to Timestamp.now(),
+                    "status" to "PRESENT"
+                )
+
+                firestore.collection("attendance")
+                    .add(attendanceData)
+                    .addOnSuccessListener {
+                        isSubmitting = false
+                        geofenceManager.addGeofence(session.id, session.latitude, session.longitude)
+                        Toast.makeText(context, "Attendance Marked Successfully!", Toast.LENGTH_SHORT).show()
+                        navController.navigate("history")
+                    }
+                    .addOnFailureListener { e ->
+                        isSubmitting = false
+                        Toast.makeText(context, "Failed: ${e.message}", Toast.LENGTH_SHORT).show()
+                    }
+            } else {
+                Toast.makeText(context, "User not authenticated", Toast.LENGTH_SHORT).show()
+                isSubmitting = false
+            }
+        } else {
+            isSubmitting = false
+        }
+    }
+
+    val showBiometricPrompt = {
+        val activity = context.findFragmentActivity()
+        if (activity != null) {
+            Log.d(TAG, "Showing biometric prompt")
+            val promptInfo = BiometricPrompt.PromptInfo.Builder()
+                .setTitle("Mark Attendance")
+                .setSubtitle("Confirm identity to continue")
+                .setAllowedAuthenticators(authenticators)
+                // Negative button is required when DEVICE_CREDENTIAL is NOT used
+                .setNegativeButtonText("Cancel")
+                .build()
+
+            val biometricPrompt = BiometricPrompt(activity, executor,
+                object : BiometricPrompt.AuthenticationCallback() {
+                    override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                        super.onAuthenticationError(errorCode, errString)
+                        Log.e(TAG, "Authentication error: $errString ($errorCode)")
+                        isSubmitting = false
+                        if (errorCode != BiometricPrompt.ERROR_USER_CANCELED && 
+                            errorCode != BiometricPrompt.ERROR_NEGATIVE_BUTTON &&
+                            errorCode != BiometricPrompt.ERROR_CANCELED) {
+                            Toast.makeText(context, "Verification error: $errString", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+
+                    override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                        super.onAuthenticationSucceeded(result)
+                        Log.d(TAG, "Authentication succeeded")
+                        // onMarkAttendance sets isSubmitting to true and then false
+                        onMarkAttendance()
+                    }
+
+                    override fun onAuthenticationFailed() {
+                        super.onAuthenticationFailed()
+                        Log.d(TAG, "Authentication failed")
+                        isSubmitting = false
+                        Toast.makeText(context, "Verification failed", Toast.LENGTH_SHORT).show()
+                    }
+                })
+
+            biometricPrompt.authenticate(promptInfo)
+        } else {
+            Log.e(TAG, "Activity context is not FragmentActivity")
+            onMarkAttendance()
+        }
+    }
+
     // Fetch User Profile and Current Session
     LaunchedEffect(Unit) {
         val uid = auth.currentUser?.uid
@@ -126,7 +228,6 @@ fun CheckInScreen(navController: NavController) {
             .get()
             .addOnSuccessListener { documents ->
                 val sessions = documents.toObjects(Session::class.java)
-                // Filter manually for active session because whereGreaterThanOrEqualTo only handles one side
                 val activeSession = sessions.find { it.startTime <= now }
 
                 if (activeSession != null) {
@@ -161,13 +262,13 @@ fun CheckInScreen(navController: NavController) {
                 timeRemaining = String.format("%02d:%02d:%02d", hours, minutes, seconds)
             } else {
                 timeRemaining = "00:00:00"
-                currentSession = null // Session ended
+                currentSession = null
             }
             delay(1000)
         }
     }
 
-    // Launcher for background location permission (Android 10+)
+    // Launcher for background location permission
     val backgroundLocationLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { granted ->
@@ -180,7 +281,6 @@ fun CheckInScreen(navController: NavController) {
     ) { permissions ->
         foregroundPermissionsGranted = permissions.values.all { it }
         if (foregroundPermissionsGranted && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            // After foreground is granted, ask for background
             backgroundLocationLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
         } else {
             backgroundPermissionGranted = true
@@ -189,29 +289,15 @@ fun CheckInScreen(navController: NavController) {
 
     // Initial permission check
     LaunchedEffect(Unit) {
-        val fineLocation = ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.ACCESS_FINE_LOCATION
-        ) == PackageManager.PERMISSION_GRANTED
-        val coarseLocation = ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.ACCESS_COARSE_LOCATION
-        ) == PackageManager.PERMISSION_GRANTED
+        val fineLocation = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        val coarseLocation = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
 
         if (!fineLocation || !coarseLocation) {
-            foregroundLocationLauncher.launch(
-                arrayOf(
-                    Manifest.permission.ACCESS_FINE_LOCATION,
-                    Manifest.permission.ACCESS_COARSE_LOCATION
-                )
-            )
+            foregroundLocationLauncher.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
         } else {
             foregroundPermissionsGranted = true
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                backgroundPermissionGranted = ContextCompat.checkSelfPermission(
-                    context,
-                    Manifest.permission.ACCESS_BACKGROUND_LOCATION
-                ) == PackageManager.PERMISSION_GRANTED
+                backgroundPermissionGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_BACKGROUND_LOCATION) == PackageManager.PERMISSION_GRANTED
                 if (!backgroundPermissionGranted) {
                     backgroundLocationLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
                 }
@@ -226,21 +312,15 @@ fun CheckInScreen(navController: NavController) {
         val session = currentSession
         if (foregroundPermissionsGranted && session != null) {
             while (true) {
-                fusedLocationClient.getCurrentLocation(
-                    Priority.PRIORITY_HIGH_ACCURACY,
-                    CancellationTokenSource().token
-                )
+                fusedLocationClient.getCurrentLocation(Priority.PRIORITY_HIGH_ACCURACY, CancellationTokenSource().token)
                     .addOnSuccessListener { location ->
                         if (location != null) {
-                            val distance = calculateDistance(
-                                location.latitude, location.longitude,
-                                session.latitude, session.longitude
-                            )
+                            val distance = calculateDistance(location.latitude, location.longitude, session.latitude, session.longitude)
                             distanceToTarget = distance
                             isWithinRange = distance <= session.radius
                         }
                     }
-                delay(5000) // Update every 5 seconds
+                delay(5000)
             }
         } else {
             distanceToTarget = null
@@ -272,38 +352,17 @@ fun CheckInScreen(navController: NavController) {
             } else if (currentSession == null) {
                 Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Icon(
-                            imageVector = Icons.Default.Schedule,
-                            contentDescription = null,
-                            tint = Color.Gray,
-                            modifier = Modifier.size(64.dp)
-                        )
+                        Icon(imageVector = Icons.Default.Schedule, contentDescription = null, tint = Color.Gray, modifier = Modifier.size(64.dp))
                         Spacer(modifier = Modifier.height(16.dp))
-                        Text(
-                            text = "No current ongoing session",
-                            style = MaterialTheme.typography.titleLarge.copy(color = Color.Gray),
-                            textAlign = TextAlign.Center
-                        )
+                        Text(text = "No current ongoing session", style = MaterialTheme.typography.titleLarge.copy(color = Color.Gray), textAlign = TextAlign.Center)
                     }
                 }
             } else {
                 val session = currentSession!!
                 val course = currentCourse
 
-                // "Current Session" Badge
-                Surface(
-                    shape = RoundedCornerShape(50),
-                    color = Color(0xFFEBEEF0)
-                ) {
-                    Text(
-                        text = "CURRENT SESSION",
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            fontWeight = FontWeight.ExtraBold,
-                            letterSpacing = 0.5.sp,
-                            color = Color(0xFF1A365D)
-                        )
-                    )
+                Surface(shape = RoundedCornerShape(50), color = Color(0xFFEBEEF0)) {
+                    Text(text = "CURRENT SESSION", modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp), style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.ExtraBold, letterSpacing = 0.5.sp, color = Color(0xFF1A365D)))
                 }
 
                 Spacer(modifier = Modifier.height(16.dp))
@@ -311,19 +370,9 @@ fun CheckInScreen(navController: NavController) {
 
                 Spacer(modifier = Modifier.height(32.dp))
 
-                // Geofence Visualizer Card
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(32.dp),
-                    color = Color.White,
-                    shadowElevation = 2.dp
-                ) {
-                    Column(
-                        modifier = Modifier.padding(vertical = 32.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
+                Surface(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(32.dp), color = Color.White, shadowElevation = 2.dp) {
+                    Column(modifier = Modifier.padding(vertical = 32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                         GeofenceVisualizer(isWithinRange)
-
                         if (!isWithinRange) {
                             Spacer(modifier = Modifier.height(24.dp))
                             OutOfRangeWarning(distanceToTarget?.toInt() ?: 0)
@@ -340,41 +389,21 @@ fun CheckInScreen(navController: NavController) {
                     isLoading = isSubmitting
                 ) {
                     if (backgroundPermissionGranted) {
-                        val userId = auth.currentUser?.uid
-                        if (userId != null) {
-                            isSubmitting = true
-
-                            // Create attendance data map for cleaner Firestore insertion
-                            val attendanceData = hashMapOf(
-                                "userId" to userId,
-                                "courseId" to session.courseId,
-                                "sessionId" to session.id,
-                                "timestamp" to Timestamp.now(),
-                                "status" to "PRESENT"
-                            )
-
-                            Log.d("CheckInScreen", "Attempting to mark attendance: $attendanceData")
-
-                            // Save to Firestore
-                            firestore.collection("attendance")
-                                .add(attendanceData)
-                                .addOnSuccessListener { docRef ->
-                                    isSubmitting = false
-                                    Log.d("CheckInScreen", "Attendance marked successfully with ID: ${docRef.id}")
-                                    
-                                    // Add Geofence to monitor if they stay in range
-                                    geofenceManager.addGeofence(session.id, session.latitude, session.longitude)
-                                    
-                                    Toast.makeText(context, "Attendance Marked Successfully!", Toast.LENGTH_SHORT).show()
-                                    navController.navigate("history")
-                                }
-                                .addOnFailureListener { e ->
-                                    isSubmitting = false
-                                    Log.e("CheckInScreen", "Failed to mark attendance", e)
-                                    Toast.makeText(context, "Failed: ${e.message}", Toast.LENGTH_SHORT).show()
-                                }
-                        } else {
-                            Toast.makeText(context, "User not authenticated", Toast.LENGTH_SHORT).show()
+                        val canAuthenticate = biometricManager.canAuthenticate(authenticators)
+                        Log.d(TAG, "Biometric status: $canAuthenticate")
+                        
+                        when (canAuthenticate) {
+                            BiometricManager.BIOMETRIC_SUCCESS -> {
+                                isSubmitting = true
+                                showBiometricPrompt()
+                            }
+                            BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED -> {
+                                Toast.makeText(context, "Please set up a fingerprint to verify your identity.", Toast.LENGTH_LONG).show()
+                            }
+                            else -> {
+                                Log.w(TAG, "Biometric unavailable, falling back. Code: $canAuthenticate")
+                                onMarkAttendance()
+                            }
                         }
                     } else {
                         Toast.makeText(context, "Background location permission required", Toast.LENGTH_SHORT).show()
@@ -386,13 +415,7 @@ fun CheckInScreen(navController: NavController) {
 
                 if (!isWithinRange) {
                     Spacer(modifier = Modifier.height(12.dp))
-                    Text(
-                        text = "Verification requires proximity and active GPS",
-                        style = MaterialTheme.typography.bodySmall.copy(
-                            color = Color(0xFF74777F),
-                            textAlign = TextAlign.Center
-                        )
-                    )
+                    Text(text = "Verification requires proximity and active GPS", style = MaterialTheme.typography.bodySmall.copy(color = Color(0xFF74777F), textAlign = TextAlign.Center))
                 }
 
                 if (isWithinRange) {
@@ -400,7 +423,6 @@ fun CheckInScreen(navController: NavController) {
                     StatusMessage()
                 }
             }
-
             Spacer(modifier = Modifier.height(32.dp))
         }
     }
@@ -420,66 +442,25 @@ fun calculateDistance(lat1: Double, lon1: Double, lat2: Double, lon2: Double): D
 
 @Composable
 fun CheckInTopBar(name: String) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween
-    ) {
+    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                modifier = Modifier
-                    .size(40.dp)
-                    .clip(CircleShape)
-                    .background(Color(0xFFE0E3E5))
-            )
+            Box(modifier = Modifier.size(40.dp).clip(CircleShape).background(Color(0xFFE0E3E5)))
             Spacer(modifier = Modifier.width(12.dp))
             Column {
-                Text(
-                    text = "GOOD MORNING",
-                    style = MaterialTheme.typography.labelSmall.copy(
-                        color = Color(0xFF74777F),
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 0.5.sp
-                    )
-                )
-                Text(
-                    text = name,
-                    style = MaterialTheme.typography.bodyMedium.copy(
-                        color = Color(0xFF1A365D),
-                        fontWeight = FontWeight.Bold
-                    )
-                )
+                Text(text = "GOOD MORNING", style = MaterialTheme.typography.labelSmall.copy(color = Color(0xFF74777F), fontWeight = FontWeight.Bold, letterSpacing = 0.5.sp))
+                Text(text = name, style = MaterialTheme.typography.bodyMedium.copy(color = Color(0xFF1A365D), fontWeight = FontWeight.Bold))
             }
         }
-        Icon(
-            imageVector = Icons.Outlined.Notifications,
-            contentDescription = "Notifications",
-            tint = Color(0xFF43474E),
-            modifier = Modifier.size(24.dp)
-        )
+        Icon(imageVector = Icons.Outlined.Notifications, contentDescription = "Notifications", tint = Color(0xFF43474E), modifier = Modifier.size(24.dp))
     }
 }
 
 @Composable
 fun CheckInHeader(session: Session, course: Course?) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(
-            text = session.location,
-            style = MaterialTheme.typography.headlineLarge.copy(
-                fontWeight = FontWeight.ExtraBold,
-                fontSize = 44.sp,
-                color = Color(0xFF002045),
-                letterSpacing = (-1).sp
-            )
-        )
+        Text(text = session.location, style = MaterialTheme.typography.headlineLarge.copy(fontWeight = FontWeight.ExtraBold, fontSize = 44.sp, color = Color(0xFF002045), letterSpacing = (-1).sp))
         Spacer(modifier = Modifier.height(4.dp))
-        Text(
-            text = "${course?.title ?: "Unknown Course"} • ${session.type}",
-            style = MaterialTheme.typography.bodyMedium.copy(
-                color = Color(0xFF43474E),
-                fontWeight = FontWeight.Medium
-            )
-        )
+        Text(text = "${course?.title ?: "Unknown Course"} • ${session.type}", style = MaterialTheme.typography.bodyMedium.copy(color = Color(0xFF43474E), fontWeight = FontWeight.Medium))
     }
 }
 
@@ -488,149 +469,48 @@ fun GeofenceVisualizer(isWithinRange: Boolean) {
     val accentColor = if (isWithinRange) Color(0xFF388E3C) else Color(0xFFBA1A1A)
     val bgColor = if (isWithinRange) Color(0xFF00BFA5) else Color(0xFFBA1A1A)
 
-    Box(
-        modifier = Modifier.size(240.dp),
-        contentAlignment = Alignment.Center
-    ) {
+    Box(modifier = Modifier.size(240.dp), contentAlignment = Alignment.Center) {
         Canvas(modifier = Modifier.size(240.dp)) {
-            drawCircle(
-                color = bgColor.copy(alpha = 0.05f),
-                radius = size.minDimension / 2
-            )
-            drawCircle(
-                color = bgColor.copy(alpha = 0.1f),
-                radius = size.minDimension / 2.4f,
-                style = Stroke(width = 2.dp.toPx())
-            )
+            drawCircle(color = bgColor.copy(alpha = 0.05f), radius = size.minDimension / 2)
+            drawCircle(color = bgColor.copy(alpha = 0.1f), radius = size.minDimension / 2.4f, style = Stroke(width = 2.dp.toPx()))
         }
-
-        Surface(
-            modifier = Modifier.size(160.dp),
-            shape = CircleShape,
-            color = Color.White,
-            border = androidx.compose.foundation.BorderStroke(1.dp, bgColor.copy(alpha = 0.1f))
-        ) {
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center,
-                modifier = Modifier.padding(16.dp)
-            ) {
-                Icon(
-                    imageVector = if (isWithinRange) Icons.Default.VerifiedUser else Icons.Default.LocationOff,
-                    contentDescription = null,
-                    tint = accentColor,
-                    modifier = Modifier.size(48.dp)
-                )
+        Surface(modifier = Modifier.size(160.dp), shape = CircleShape, color = Color.White, border = androidx.compose.foundation.BorderStroke(1.dp, bgColor.copy(alpha = 0.1f))) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center, modifier = Modifier.padding(16.dp)) {
+                Icon(imageVector = if (isWithinRange) Icons.Default.VerifiedUser else Icons.Default.LocationOff, contentDescription = null, tint = accentColor, modifier = Modifier.size(48.dp))
             }
         }
     }
-
     Spacer(modifier = Modifier.height(16.dp))
-
-    Text(
-        text = if (isWithinRange) "Geofence Active" else "Geofence Inactive",
-        style = MaterialTheme.typography.titleLarge.copy(
-            fontWeight = FontWeight.Bold,
-            color = Color(0xFF002045)
-        )
-    )
-    Text(
-        text = if (isWithinRange) "WITHIN RANGE" else "OUT OF RANGE",
-        style = MaterialTheme.typography.labelSmall.copy(
-            color = accentColor,
-            fontWeight = FontWeight.ExtraBold,
-            letterSpacing = 1.sp
-        )
-    )
+    Text(text = if (isWithinRange) "Geofence Active" else "Geofence Inactive", style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold, color = Color(0xFF002045)))
+    Text(text = if (isWithinRange) "WITHIN RANGE" else "OUT OF RANGE", style = MaterialTheme.typography.labelSmall.copy(color = accentColor, fontWeight = FontWeight.ExtraBold, letterSpacing = 1.sp))
 }
 
 @Composable
 fun OutOfRangeWarning(distance: Int) {
-    Surface(
-        modifier = Modifier
-            .padding(horizontal = 24.dp)
-            .fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        color = Color(0xFFFFDAD6).copy(alpha = 0.3f),
-        border = androidx.compose.foundation.BorderStroke(
-            1.dp,
-            Color(0xFFFFDAD6).copy(alpha = 0.5f)
-        )
-    ) {
-        Row(
-            modifier = Modifier.padding(16.dp),
-            verticalAlignment = Alignment.Top
-        ) {
-            Icon(
-                imageVector = Icons.Default.Warning,
-                contentDescription = null,
-                tint = Color(0xFFBA1A1A),
-                modifier = Modifier.size(20.dp)
-            )
+    Surface(modifier = Modifier.padding(horizontal = 24.dp).fillMaxWidth(), shape = RoundedCornerShape(16.dp), color = Color(0xFFFFDAD6).copy(alpha = 0.3f), border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFFFDAD6).copy(alpha = 0.5f))) {
+        Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.Top) {
+            Icon(imageVector = Icons.Default.Warning, contentDescription = null, tint = Color(0xFFBA1A1A), modifier = Modifier.size(20.dp))
             Spacer(modifier = Modifier.width(12.dp))
-            Text(
-                text = "You are ${distance}m away from the classroom. Please move closer to enable check-in.",
-                style = MaterialTheme.typography.bodySmall.copy(
-                    color = Color(0xFF410002),
-                    fontWeight = FontWeight.Medium,
-                    lineHeight = 18.sp
-                )
-            )
+            Text(text = "You are ${distance}m away from the classroom. Please move closer to enable check-in.", style = MaterialTheme.typography.bodySmall.copy(color = Color(0xFF410002), fontWeight = FontWeight.Medium, lineHeight = 18.sp))
         }
     }
 }
 
 @Composable
-fun MarkAttendanceButton(
-    isEnabled: Boolean,
-    isLoading: Boolean = false,
-    onClick: () -> Unit
-) {
-    Button(
-        onClick = onClick,
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(64.dp),
-        shape = RoundedCornerShape(50),
-        colors = ButtonDefaults.buttonColors(
-            containerColor = if (isEnabled) Color(0xFF1A365D) else Color(0xFFEBEEF0),
-            contentColor = if (isEnabled) Color.White else Color(0xFFC4C6CF)
-        ),
-        enabled = isEnabled && !isLoading
-    ) {
+fun MarkAttendanceButton(isEnabled: Boolean, isLoading: Boolean = false, onClick: () -> Unit) {
+    Button(onClick = onClick, modifier = Modifier.fillMaxWidth().height(64.dp), shape = RoundedCornerShape(50), colors = ButtonDefaults.buttonColors(containerColor = if (isEnabled) Color(0xFF1A365D) else Color(0xFFEBEEF0), contentColor = if (isEnabled) Color.White else Color(0xFFC4C6CF)), enabled = isEnabled && !isLoading) {
         if (isLoading) {
-            CircularProgressIndicator(
-                color = Color.White,
-                modifier = Modifier.size(24.dp),
-                strokeWidth = 2.dp
-            )
+            CircularProgressIndicator(color = Color.White, modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
         } else {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.Center,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
                 if (!isEnabled) {
-                    Icon(
-                        imageVector = Icons.Default.Lock,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
-                    )
+                    Icon(imageVector = Icons.Default.Lock, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(8.dp))
                 }
-                Text(
-                    text = "Mark Attendance",
-                    style = MaterialTheme.typography.titleMedium.copy(
-                        fontWeight = FontWeight.Bold
-                    )
-                )
+                Text(text = "Mark Attendance", style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold))
                 if (isEnabled) {
                     Spacer(modifier = Modifier.width(12.dp))
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.ArrowForwardIos,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp)
-                    )
+                    Icon(imageVector = Icons.AutoMirrored.Filled.ArrowForwardIos, contentDescription = null, modifier = Modifier.size(16.dp))
                 }
             }
         }
@@ -639,197 +519,64 @@ fun MarkAttendanceButton(
 
 @Composable
 fun MetricsGrid(isWithinRange: Boolean, distance: Int, timeRemaining: String) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(16.dp)
-    ) {
-        MetricCard(
-            modifier = Modifier.weight(1f),
-            icon = Icons.Default.Schedule,
-            label = "TIME REMAINING",
-            value = timeRemaining,
-            iconColor = Color(0xFF1A365D)
-        )
-        MetricCard(
-            modifier = Modifier.weight(1f),
-            icon = Icons.Default.PersonPinCircle,
-            label = "DISTANCE",
-            value = "${distance}m",
-            iconColor = if (isWithinRange) Color(0xFFA04100) else Color(0xFFBA1A1A),
-            valueColor = if (isWithinRange) Color(0xFF002045) else Color(0xFFBA1A1A)
-        )
+    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+        MetricCard(modifier = Modifier.weight(1f), icon = Icons.Default.Schedule, label = "TIME REMAINING", value = timeRemaining, iconColor = Color(0xFF1A365D))
+        MetricCard(modifier = Modifier.weight(1f), icon = Icons.Default.PersonPinCircle, label = "DISTANCE", value = "${distance}m", iconColor = if (isWithinRange) Color(0xFFA04100) else Color(0xFFBA1A1A), valueColor = if (isWithinRange) Color(0xFF002045) else Color(0xFFBA1A1A))
     }
 }
 
 @Composable
-fun MetricCard(
-    modifier: Modifier = Modifier,
-    icon: ImageVector,
-    label: String,
-    value: String,
-    iconColor: Color,
-    valueColor: Color = Color(0xFF002045)
-) {
-    Surface(
-        modifier = modifier,
-        shape = RoundedCornerShape(20.dp),
-        color = Color(0xFFEBEEF0).copy(alpha = 0.5f)
-    ) {
-        Column(
-            modifier = Modifier.padding(20.dp)
-        ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = null,
-                tint = iconColor,
-                modifier = Modifier.size(24.dp)
-            )
+fun MetricCard(modifier: Modifier = Modifier, icon: ImageVector, label: String, value: String, iconColor: Color, valueColor: Color = Color(0xFF002045)) {
+    Surface(modifier = modifier, shape = RoundedCornerShape(20.dp), color = Color(0xFFEBEEF0).copy(alpha = 0.5f)) {
+        Column(modifier = Modifier.padding(20.dp)) {
+            Icon(imageVector = icon, contentDescription = null, tint = iconColor, modifier = Modifier.size(24.dp))
             Spacer(modifier = Modifier.height(12.dp))
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelSmall.copy(
-                    color = Color(0xFF43474E),
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 0.5.sp
-                )
-            )
-            Text(
-                text = value,
-                style = MaterialTheme.typography.titleLarge.copy(
-                    color = valueColor,
-                    fontWeight = FontWeight.ExtraBold,
-                    fontSize = 20.sp
-                )
-            )
+            Text(text = label, style = MaterialTheme.typography.labelSmall.copy(color = Color(0xFF43474E), fontWeight = FontWeight.Bold, letterSpacing = 0.5.sp))
+            Text(text = value, style = MaterialTheme.typography.titleLarge.copy(color = valueColor, fontWeight = FontWeight.ExtraBold, fontSize = 20.sp))
         }
     }
 }
 
 @Composable
 fun StatusMessage() {
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(12.dp),
-        color = Color(0xFFE8F5E9)
-    ) {
-        Row(
-            modifier = Modifier.padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(
-                imageVector = Icons.Default.CheckCircle,
-                contentDescription = null,
-                tint = Color(0xFF388E3C),
-                modifier = Modifier.size(24.dp)
-            )
+    Surface(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp), color = Color(0xFFE8F5E9)) {
+        Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(imageVector = Icons.Default.CheckCircle, contentDescription = null, tint = Color(0xFF388E3C), modifier = Modifier.size(24.dp))
             Spacer(modifier = Modifier.width(12.dp))
-            Text(
-                text = "Signal is strong. Your device is ready for check-in.",
-                style = MaterialTheme.typography.bodySmall.copy(
-                    color = Color(0xFF2E7D32),
-                    fontWeight = FontWeight.Medium
-                )
-            )
+            Text(text = "Signal is strong. Your device is ready for check-in.", style = MaterialTheme.typography.bodySmall.copy(color = Color(0xFF2E7D32), fontWeight = FontWeight.Medium))
         }
     }
 }
 
 @Composable
 fun CheckInBottomNavigation(navController: NavController) {
-    Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)),
-        color = Color.White.copy(alpha = 0.95f),
-        shadowElevation = 16.dp
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = 32.dp, top = 16.dp, start = 16.dp, end = 16.dp),
-            horizontalArrangement = Arrangement.SpaceAround,
-            verticalAlignment = Alignment.Bottom
-        ) {
-            CheckInBottomNavItem(icon = Icons.Outlined.Home, label = "HOME", onClick = {
-                navController.navigate("home")
-            })
-            CheckInBottomNavItem(
-                icon = Icons.Outlined.Schedule,
-                label = "SCHEDULE",
-                onClick = { navController.navigate("schedule") }
-            )
-            CheckInBottomNavItem(
-                icon = Icons.Default.LocationOn,
-                label = "CHECK-IN",
-                isSelected = true,
-                onClick = {})
-            CheckInBottomNavItem(icon = Icons.Outlined.History, label = "HISTORY", onClick = {
-                navController.navigate("history")
-            })
+    Surface(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)), color = Color.White.copy(alpha = 0.95f), shadowElevation = 16.dp) {
+        Row(modifier = Modifier.fillMaxWidth().padding(bottom = 32.dp, top = 16.dp, start = 16.dp, end = 16.dp), horizontalArrangement = Arrangement.SpaceAround, verticalAlignment = Alignment.Bottom) {
+            CheckInBottomNavItem(icon = Icons.Outlined.Home, label = "HOME", onClick = { navController.navigate("home") })
+            CheckInBottomNavItem(icon = Icons.Outlined.Schedule, label = "SCHEDULE", onClick = { navController.navigate("schedule") })
+            CheckInBottomNavItem(icon = Icons.Default.LocationOn, label = "CHECK-IN", isSelected = true, onClick = {})
+            CheckInBottomNavItem(icon = Icons.Outlined.History, label = "HISTORY", onClick = { navController.navigate("history") })
         }
     }
 }
 
 @Composable
-fun CheckInBottomNavItem(
-    icon: ImageVector,
-    label: String,
-    isSelected: Boolean = false,
-    onClick: () -> Unit
-) {
+fun CheckInBottomNavItem(icon: ImageVector, label: String, isSelected: Boolean = false, onClick: () -> Unit) {
     if (isSelected) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier.offset(y = (-8).dp)
-        ) {
-            Surface(
-                modifier = Modifier.size(64.dp),
-                shape = CircleShape,
-                color = Color(0xFF1A365D),
-                shadowElevation = 8.dp,
-                onClick = onClick
-            ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.offset(y = (-8).dp)) {
+            Surface(modifier = Modifier.size(64.dp), shape = CircleShape, color = Color(0xFF1A365D), shadowElevation = 8.dp, onClick = onClick) {
                 Box(contentAlignment = Alignment.Center) {
-                    Icon(
-                        imageVector = icon,
-                        contentDescription = label,
-                        tint = Color.White,
-                        modifier = Modifier.size(28.dp)
-                    )
+                    Icon(imageVector = icon, contentDescription = label, tint = Color.White, modifier = Modifier.size(28.dp))
                 }
             }
             Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelSmall.copy(
-                    fontWeight = FontWeight.Bold,
-                    color = Color(0xFF1A365D),
-                    letterSpacing = 0.5.sp
-                )
-            )
+            Text(text = label, style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, color = Color(0xFF1A365D), letterSpacing = 0.5.sp))
         }
     } else {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier
-                .padding(bottom = 8.dp)
-                .clickable { onClick() }
-        ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = label,
-                tint = Color(0xFF43474E),
-                modifier = Modifier.size(24.dp)
-            )
+        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(bottom = 8.dp).clickable { onClick() }) {
+            Icon(imageVector = icon, contentDescription = label, tint = Color(0xFF43474E), modifier = Modifier.size(24.dp))
             Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelSmall.copy(
-                    fontWeight = FontWeight.Bold,
-                    color = Color(0xFF43474E),
-                    letterSpacing = 0.5.sp
-                )
-            )
+            Text(text = label, style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, color = Color(0xFF43474E), letterSpacing = 0.5.sp))
         }
     }
 }
